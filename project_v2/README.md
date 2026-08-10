@@ -15,6 +15,10 @@
 | `tune_src.py` | 폭-기울기 지표로 `SRC_POINTS` 최적화 (**아래 3번 항목 반드시 읽을 것**) |
 | `label_gt.py` | 정답 라벨 클릭 도구 (선택) |
 | `review.py` | 프레임별 시각 검토 뷰어 |
+| `control.py` | Pure Pursuit 조향 제어기 |
+| `calibrate_metric.py` | BEV 픽셀 <-> cm 환산 캘리브레이션 |
+| `test_control.py` | Pure Pursuit 기하 단위 테스트 (40개) |
+| `drive.py` | 라즈베리파이 실시간 주행 루프 (afb1) |
 
 ## 사용법
 
@@ -84,6 +88,104 @@ BEV에서 차선이 수직에 가까울 때만 정확한 근사이며, 곡률이
 
 look-ahead 거리를 y로 지정해 목표점을 뽑을 수 있으므로 Pure Pursuit 같은
 기하 제어기에 바로 물릴 수 있다.
+
+## Pure Pursuit (`control.py`)
+
+중심선 위에서 뒤축으로부터 **방사 거리**가 `L_d` 인 점을 찾아 원호로 통과한다.
+
+```
+alpha = atan2(Y, X)              목표점 방위각 (뒤축 기준)
+kappa = 2Y / L_d^2               = 2 sin(alpha)/L_d, 삼각함수 없이 같은 값
+delta = atan(L * kappa)          자전거 모델 조향각
+servo = 90 - delta_deg * SERVO_PER_DEG   -> clip(30, 150)
+```
+
+부호는 **좌선회가 +**. 서보는 왼쪽이 작은 값이므로(`raspi/L_5_Capture.py`:
+ArrowLeft -> 40) 마지막에 뒤집힌다.
+
+### 실측값
+
+| 항목 | 값 | 출처 |
+|---|---|---|
+| 차선 실폭 | 20 cm | 실측 |
+| 휠베이스 | 11 cm | 실측 |
+| `px_per_cm_x` | 22.875 | 457.5px(라벨 51쌍) / 20cm |
+| `px_per_cm_y` | **12.0 (추정)** | 미실측 — `calibrate_metric.py` 필요 |
+| `rear_axle_offset_cm` | **12.0 (추정)** | 미실측 |
+| `LOOKAHEAD_CM` | 20 | 휠베이스의 1.5~3배(17~33cm) 중간값 |
+
+BEV 가로 640px = 실제 28.0cm 다. **종방향 스케일과 뒤축 오프셋이 아직
+추정값이라 servo 절대값은 신뢰하면 안 된다** — 상대적 경향만 본다.
+`metric.json` 이 없으면 실행 시 경고가 뜬다.
+
+### 좌표계
+
+`bev.bev_to_vehicle()` / `vehicle_to_bev()`. 원점 = 뒤축 중심, **X 전방(+),
+Y 좌측(+)**. BEV는 아래로 갈수록 차에 가까우므로 X 는 `(H-1 - y)` 에 비례한다.
+
+x와 y의 cm 환산 계수가 다른 이유는 dst 사각형을 640×480 전체로 잡아 BEV를
+만들었기 때문이다 (실세계 영역의 가로:세로 비와 무관하게 4:3 으로 강제).
+현재 비등방 비율은 약 1.9 다.
+
+## 실시간 주행 (`drive.py`)
+
+라즈베리파이에서만 돈다. afb1 API 는 `raspi/` 예제에서 확인된 것만 쓴다:
+`gpio.init/stby/servo/motor/stop_all`, `camera.init/get_image/release_camera`,
+`flask.imshow`.
+
+```bash
+python3 drive.py --replay ../project/captures   # 0) 하드웨어 없이 임포트/로직 확인
+python3 drive.py --dry-run --preview            # 1) 모터 끈 채 조향만 확인
+python3 drive.py --speed 60 --record run1       # 2) 실제 주행 + 프레임 녹화
+python3 review.py --src run1 --sort worst       # 3) 주행분을 오프라인에서 정밀 검토
+```
+
+**기본은 모터 정지다.** `--speed` 를 명시해야 움직인다.
+서보가 반대로 돌면 `--invert-servo`.
+
+### 디버그 창을 따로 만들지 않은 이유
+
+`--preview` 가 `afb1.flask.imshow` 로 최소 오버레이(중심선/목표점/servo/fps)를
+쏜다. 그 이상은 만들지 않았다.
+
+30fps 로 흘러가는 화면으로는 "왜 저 프레임에서 틀렸는지"를 볼 수 없다.
+**`--record` 로 저장해 두고 `review.py` 로 한 장씩 넘겨보는 쪽이 훨씬 낫다** —
+좌우 다항식, 슬라이딩 윈도우, 정답 라벨, Pure Pursuit 원호가 전부 겹쳐 나오고
+`--sort worst` 로 실패 프레임부터 볼 수 있다. 매 프레임 오버레이를 그리는
+비용도 제어 루프가 쓸 CPU 다.
+
+녹화 파일은 `captures/` 와 같은 형식(채널 스왑 후 640×480)이라 `review.py`
+`evaluate.py` 가 그대로 처리한다. 덤으로 **시간축 추적에 필요한 연속 주행
+데이터가 이때 확보된다** — 지금까지 계속 막혀 있던 지점이다.
+
+### 채널 스왑 주의
+
+`raspi/L_5_Capture.py` 는 저장 전에 `cv2.cvtColor(frame, COLOR_BGR2RGB)` 를
+거친 뒤 `cv2.imwrite` 한다. 따라서 `captures/` 를 `cv2.imread` 로 읽은 배열은
+**`get_image()` 원본이 아니라 채널이 한 번 뒤바뀐 것**이다. 오프라인에서
+튜닝한 이진화가 같은 색을 보려면 실시간 루프도 똑같이 스왑해야 하며,
+`Afb1Hardware.read()` 가 그렇게 한다. 이걸 빠뜨리면 특히 `hsv` 백엔드가
+전혀 다른 색을 보게 된다.
+
+### 검출 실패 처리
+
+정적 평가에서 중심선 미산출이 74장 중 9장(12%)이었다. 30fps 면 초당 서너
+프레임은 실패한다는 뜻이라 정의된 동작이 필요하다.
+
+```
+실패 1~4프레임  : 직전 서보 명령 유지하고 계속 주행
+실패 5프레임 이상: 모터 정지 (조향은 직전 값 유지)
+종료/예외/Ctrl+C : finally 에서 motor(0) + servo(90) + stop_all()
+```
+
+서보 명령에는 지수이동평균(`SERVO_EMA_ALPHA=0.5`)을 건다. 끄려면 `--ema 1.0`.
+
+### 성능
+
+Mac 기준 프레임당 `warp 0.55ms + adaptive 0.50ms + sliding 1.32ms = 약 2.4ms`.
+Pi 는 5~10배 느리다고 보면 15~25ms 로 30fps 는 무리 없을 전망이다.
+**다만 이건 추정이며 실측이 필요하다** — `drive.py` 가 fps 를 찍어준다.
+`tophat` 은 Mac 에서 0.7ms 더 든다.
 
 ## 라벨링 (`label_gt.py`)
 

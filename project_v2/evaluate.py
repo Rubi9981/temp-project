@@ -20,6 +20,7 @@ import numpy as np
 import bev as bevlib
 import binarize
 import config as cfg
+import control
 import detect
 
 
@@ -39,7 +40,7 @@ def load_gt():
         return json.load(f)
 
 
-def run(paths, already_bev, binarize_name, detect_name, gt=None):
+def run(paths, already_bev, binarize_name, detect_name, gt=None, pp=None):
     """한 조합을 데이터셋 전체에 돌려 통계를 낸다."""
     bin_fn = binarize.BACKENDS[binarize_name]
     det_fn = detect.DETECTORS[detect_name]
@@ -57,6 +58,10 @@ def run(paths, already_bev, binarize_name, detect_name, gt=None):
     center_err, side_err = [], []
     center_total = center_missed = 0
     side_total = side_missed = 0
+
+    # Pure Pursuit 조향 통계
+    servos = []
+    servo_clipped = servo_clamped = servo_nores = 0
 
     for path in paths:
         frame, _, _ = bevlib.load_bev(path, already_bev=already_bev)
@@ -76,6 +81,17 @@ def run(paths, already_bev, binarize_name, detect_name, gt=None):
         if res.width is not None:
             widths.append(res.width)
 
+        if pp is not None:
+            ctrl = pp(res, roi.shape[0], y_start)
+            if ctrl.ok:
+                servos.append(ctrl.servo)
+                if ctrl.servo in (cfg.SERVO_MIN, cfg.SERVO_MAX):
+                    servo_clipped += 1
+                if ctrl.clamped:
+                    servo_clamped += 1
+            else:
+                servo_nores += 1
+
         error, _ = detect.lane_error(res.center_x)
         if error is not None:
             errors.append(error)
@@ -83,7 +99,7 @@ def run(paths, already_bev, binarize_name, detect_name, gt=None):
                 saturated += 1
 
         if gt is not None:
-            label = gt.get(os.path.basename(path))
+            label = gt.get(cfg.bev_key(os.path.basename(path), already_bev))
             if label is not None:
                 gl, gr = label.get('left'), label.get('right')
 
@@ -108,6 +124,7 @@ def run(paths, already_bev, binarize_name, detect_name, gt=None):
     widths = np.array(widths, float)
     center_err = np.array(center_err, float)
     side_err = np.array(side_err, float)
+    servos = np.array(servos, float)
 
     return {
         'binarize': binarize_name,
@@ -132,6 +149,15 @@ def run(paths, already_bev, binarize_name, detect_name, gt=None):
         'side_missed': side_missed,
         'side_mae': side_err.mean() if side_err.size else None,
         'side_p95': np.percentile(side_err, 95) if side_err.size else None,
+        # Pure Pursuit
+        'servo_n': int(servos.size),
+        'servo_mean': servos.mean() if servos.size else None,
+        'servo_std': servos.std() if servos.size else None,
+        'servo_min': servos.min() if servos.size else None,
+        'servo_max': servos.max() if servos.size else None,
+        'servo_clipped': servo_clipped,
+        'servo_clamped': servo_clamped,
+        'servo_nores': servo_nores,
     }
 
 
@@ -178,6 +204,19 @@ def print_detail(r):
                   f"MAE={mae}px p95={p95}px  (검출 실패 {r['side_missed']}장)")
 
 
+def print_control(r):
+    if not r['servo_n'] and not r['servo_nores']:
+        return
+    n = r['n']
+    print('  [Pure Pursuit 조향]')
+    print(f"    출력 {r['servo_n']}장 / 중심선 없어 미산출 {r['servo_nores']}장")
+    if r['servo_n']:
+        print(f"    servo mean={r['servo_mean']:.1f} std={r['servo_std']:.1f} "
+              f"범위 {r['servo_min']:.0f}~{r['servo_max']:.0f} (중립 {cfg.SERVO_CENTER})")
+        print(f"    서보 한계({cfg.SERVO_MIN}/{cfg.SERVO_MAX}) 도달 : {_pct(r['servo_clipped'], n)}")
+        print(f"    L_d 시야밖 클램프              : {_pct(r['servo_clamped'], n)}")
+
+
 def print_table(results, has_gt):
     header = f"{'binarize':<10}{'detect':<10}{'정상':>7}{'단측':>7}{'실패':>7}{'과검출':>8}{'폭std':>8}{'err std':>9}"
     if has_gt:
@@ -208,11 +247,21 @@ def main():
     ap.add_argument('--detect', default=detect.BASELINE, choices=list(detect.DETECTORS))
     ap.add_argument('--compare-all', action='store_true', help='모든 조합 비교')
     ap.add_argument('--gt', action='store_true', help='gt.json 이 있으면 실제 오차도 낸다')
+    ap.add_argument('--control', action='store_true', help='Pure Pursuit 조향 통계도 낸다')
+    ap.add_argument('--lookahead', type=float, default=cfg.LOOKAHEAD_CM)
     args = ap.parse_args()
 
     paths, already_bev = collect_paths(args.src)
     if not paths:
         raise SystemExit(f'이미지가 없습니다: {args.src}')
+
+    pp = None
+    if args.control:
+        metric = cfg.get_metric()
+        pp = control.PurePursuit(metric=metric, lookahead_cm=args.lookahead)
+        if not metric.measured:
+            print('[경고] metric.json 이 없어 종방향 스케일이 추정값입니다. '
+                  'servo 절대값은 신뢰하지 마세요 (calibrate_metric.py).')
 
     gt = load_gt() if args.gt else None
     if args.gt and gt is None:
@@ -226,10 +275,11 @@ def main():
         results = []
         for b in binarize.BACKENDS:
             for d in detect.DETECTORS:
-                results.append(run(paths, already_bev, b, d, gt))
+                results.append(run(paths, already_bev, b, d, gt, pp))
         baseline = next(r for r in results
                         if r['binarize'] == binarize.BASELINE and r['detect'] == detect.BASELINE)
         print_detail(baseline)
+        print_control(baseline)
         print_table(results, has_gt=gt is not None)
         print('\n* 정상/단측/실패는 검출기 기준, 과검출은 이진화 기준이다.')
         print('* 폭std는 반사광을 차선으로 오인했는지 잡아내는 프록시다 — 낮을수록 좋다.')
@@ -237,7 +287,9 @@ def main():
             print('* GT중심 = 좌우 둘 다 보이는 프레임의 차선중심 오차(px).')
             print('* GT단측 = 한쪽만 보이는 프레임의 해당 차선 위치 오차(px).')
     else:
-        print_detail(run(paths, already_bev, args.binarize, args.detect, gt))
+        r = run(paths, already_bev, args.binarize, args.detect, gt, pp)
+        print_detail(r)
+        print_control(r)
 
 
 if __name__ == '__main__':

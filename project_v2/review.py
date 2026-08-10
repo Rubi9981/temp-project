@@ -36,6 +36,7 @@ import numpy as np
 import bev as bevlib
 import binarize
 import config as cfg
+import control
 import detect
 
 PLAY_DELAY_MS = 200
@@ -69,7 +70,8 @@ def gt_error(res, label):
     return 0.0, 'GT: no lane, correctly empty'
 
 
-def draw_bev(frame, y_start, res, bin_name, det_name, info, label):
+def draw_bev(frame, y_start, res, bin_name, det_name, info, label,
+             ctrl=None, metric=None):
     """BEV 위에 ROI, 중심선, 검출 결과, 정답 라벨, 조향 오차를 그린다."""
     vis = frame.copy()
     h, w = vis.shape[:2]
@@ -142,6 +144,13 @@ def draw_bev(frame, y_start, res, bin_name, det_name, info, label):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
     cv2.putText(vis, info, (20, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
+    draw_control(vis, ctrl, metric)
+    if ctrl is not None and ctrl.ok:
+        txt = (f'servo={ctrl.servo}  delta={ctrl.delta_deg:+.1f}deg  '
+               f'Ld={ctrl.lookahead_cm:.0f}cm' + ('  [CLAMPED]' if ctrl.clamped else ''))
+        cv2.putText(vis, txt, (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
+        cv2.putText(vis, txt, (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 120, 255), 1)
+
     _, gt_txt = gt_error(res, label)
     if gt_txt:
         cv2.putText(vis, gt_txt, (20, 116), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
@@ -149,7 +158,7 @@ def draw_bev(frame, y_start, res, bin_name, det_name, info, label):
     return vis
 
 
-def draw_original(original, matrix, y_start, res):
+def draw_original(original, matrix, y_start, res, ctrl=None, metric=None):
     """원본 이미지에 SRC 사각형과 L/R/C 역투영을 그린다."""
     vis = original.copy()
     cv2.polylines(vis, [cfg.get_src_points().astype(np.int32)], True, (255, 255, 0), 2)
@@ -159,6 +168,7 @@ def draw_original(original, matrix, y_start, res):
 
     matrix_inv = np.linalg.inv(matrix)
     roi_h = original.shape[0] - y_start
+    draw_control(vis, ctrl, metric, matrix_inv)
 
     # 중심선을 원본 카메라 시점으로 역투영 — 검출이 맞는지 가장 확실한 확인법
     if res.fit_center is not None:
@@ -184,24 +194,42 @@ def draw_original(original, matrix, y_start, res):
     return vis
 
 
-def process(path, already_bev, bin_name, det_name):
+def process(path, already_bev, bin_name, det_name, pp=None):
     frame, matrix, original = bevlib.load_bev(path, already_bev=already_bev)
     if frame is None:
         return None
     roi, y_start = bevlib.roi_of(frame)
     mask = binarize.BACKENDS[bin_name](roi)
     res = detect.DETECTORS[det_name](mask)
-    return frame, matrix, original, roi, y_start, mask, res
+    ctrl = pp(res, roi.shape[0], y_start) if pp is not None else None
+    return frame, matrix, original, roi, y_start, mask, res, ctrl
 
 
-def bev_key(name, already_bev):
-    """파일명을 gt.json 의 키로 바꾼다.
+def arc_bev_points(ctrl, metric):
+    """Pure Pursuit 원호를 BEV 픽셀 점열로. 목표점보다 조금 더 길게 그린다."""
+    X, Y = control.arc_points(ctrl.kappa, ctrl.lookahead_cm * 1.25, n=60)
+    x_px, y_px = bevlib.vehicle_to_bev(X, Y, metric)
+    return np.stack([x_px, y_px], axis=1)
 
-    라벨은 captures_bev/ 기준으로 찍혀 있고 그 파일들은 save_bev.py 가
-    'bev_' 접두사를 붙여 만든 것이다. captures/ 원본을 순회할 때는
-    접두사를 붙여줘야 라벨이 매칭된다.
-    """
-    return name if already_bev else f'bev_{name}'
+
+def draw_control(vis, ctrl, metric, matrix_inv=None):
+    """목표점과 예상 주행 원호를 그린다. matrix_inv 를 주면 원본 시점으로 역투영."""
+    if ctrl is None or not ctrl.ok:
+        return
+
+    pts = arc_bev_points(ctrl, metric)
+    if matrix_inv is not None:
+        pts = bevlib.project_points(pts, matrix_inv)
+    pts = pts.astype(np.int32)
+
+    cv2.polylines(vis, [pts], False, (0, 0, 0), 6)
+    cv2.polylines(vis, [pts], False, (255, 0, 255), 2)
+
+    gx, gy = ctrl.goal_bev
+    if matrix_inv is not None:
+        gx, gy = bevlib.project_point((gx, gy), matrix_inv)
+    cv2.circle(vis, (int(gx), int(gy)), 11, (0, 0, 0), -1)
+    cv2.circle(vis, (int(gx), int(gy)), 9, (255, 0, 255), -1)
 
 
 def _titled(img, text):
@@ -213,12 +241,13 @@ def _titled(img, text):
 
 def build_panel(out, already_bev, bin_name, det_name, info, label, scale=1.0):
     """원본 + BEV + 마스크를 한 장으로 합친다. 창 하나로 순회하기 위한 것."""
-    frame, matrix, original, _, y_start, mask, res = out
+    frame, matrix, original, _, y_start, mask, res, ctrl = out
+    metric = cfg.get_metric()
 
-    bev_vis = draw_bev(frame, y_start, res, bin_name, det_name, info, label)
+    bev_vis = draw_bev(frame, y_start, res, bin_name, det_name, info, label, ctrl, metric)
     panels = []
     if not already_bev:
-        panels.append(_titled(draw_original(original, matrix, y_start, res),
+        panels.append(_titled(draw_original(original, matrix, y_start, res, ctrl, metric),
                               'ORIGINAL + back-projected'))
     panels.append(_titled(bev_vis, "BIRD'S EYE + centerline"))
 
@@ -246,25 +275,41 @@ def build_panel(out, already_bev, bin_name, det_name, info, label, scale=1.0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--src', default='captures', choices=['captures', 'captures_bev'])
+    ap.add_argument('--src', default='captures',
+                    help="'captures' | 'captures_bev' | 임의 폴더 경로 "
+                         "(drive.py --record 로 저장한 주행 프레임 등)")
     # 기본값을 GT 평가 승자(중심 MAE 1.9px)로 둔다. 플래그 없이 바로 쓸 수 있게.
     ap.add_argument('--binarize', default='adaptive', choices=list(binarize.BACKENDS))
     ap.add_argument('--detect', default='sliding', choices=list(detect.DETECTORS))
     ap.add_argument('--sort', default='name', choices=['name', 'worst'],
                     help='worst=정답 라벨 대비 오차 큰 순 (gt.json 필요)')
     ap.add_argument('--scale', type=float, default=0.75, help='창 크기 배율')
+    ap.add_argument('--lookahead', type=float, default=cfg.LOOKAHEAD_CM,
+                    help='Pure Pursuit look-ahead 거리 (cm)')
+    ap.add_argument('--no-control', action='store_true', help='Pure Pursuit 오버레이 끄기')
     ap.add_argument('--export', metavar='DIR',
                     help='GUI 대신 주석 이미지를 이 폴더에 저장')
     args = ap.parse_args()
 
-    directory = cfg.CAPTURES_BEV_DIR if args.src == 'captures_bev' else cfg.CAPTURES_DIR
-    already_bev = args.src == 'captures_bev'
+    if args.src == 'captures_bev':
+        directory, already_bev = cfg.CAPTURES_BEV_DIR, True
+    elif args.src == 'captures':
+        directory, already_bev = cfg.CAPTURES_DIR, False
+    else:
+        directory, already_bev = args.src, False      # 임의 폴더는 원본으로 취급
     paths = sorted(
         p for p in glob.glob(os.path.join(directory, '*'))
         if p.lower().endswith(('.jpg', '.jpeg', '.png'))
     )
     if not paths:
         raise SystemExit(f'이미지가 없습니다: {directory}')
+
+    metric = cfg.get_metric()
+    pp = None if args.no_control else control.PurePursuit(
+        metric=metric, lookahead_cm=args.lookahead)
+    if pp is not None and not metric.measured:
+        print('[경고] metric.json 이 없어 종방향 스케일이 추정값입니다. '
+              'servo 절대값은 신뢰하지 마세요 (calibrate_metric.py).')
 
     gt = {}
     if os.path.exists(cfg.GT_PATH):
@@ -281,10 +326,10 @@ def main():
             raise SystemExit('--sort worst 는 gt.json 이 필요합니다. label_gt.py 를 먼저 돌리세요.')
 
         def rank(p):
-            out = process(p, already_bev, args.binarize, args.detect)
+            out = process(p, already_bev, args.binarize, args.detect, pp)
             if out is None:
                 return -1
-            err, _ = gt_error(out[6], gt.get(bev_key(os.path.basename(p), already_bev)))
+            err, _ = gt_error(out[6], gt.get(cfg.bev_key(os.path.basename(p), already_bev)))
             return 1e9 if err is None else err   # 미검출/오검출을 맨 앞으로
 
         paths.sort(key=rank, reverse=True)
@@ -297,13 +342,13 @@ def main():
     if args.export:
         os.makedirs(args.export, exist_ok=True)
         for order, path in enumerate(paths):
-            out = process(path, already_bev, bin_names[bin_idx], det_names[det_idx])
+            out = process(path, already_bev, bin_names[bin_idx], det_names[det_idx], pp)
             if out is None:
                 continue
             name = os.path.basename(path)
             info = f'[{order + 1}/{len(paths)}] {name} blobs={detect.count_blobs(out[5])}'
             panel = build_panel(out, already_bev, bin_names[bin_idx], det_names[det_idx],
-                                info, gt.get(bev_key(name, already_bev)), args.scale)
+                                info, gt.get(cfg.bev_key(name, already_bev)), args.scale)
             cv2.imwrite(os.path.join(args.export, f'{order:03d}_{name}'), panel)
         print(f'저장 완료: {args.export}/ ({len(paths)}장, 파일명 앞 번호가 정렬 순서)')
         return
@@ -314,7 +359,7 @@ def main():
     while True:
         path = paths[idx]
         name = os.path.basename(path)
-        out = process(path, already_bev, bin_names[bin_idx], det_names[det_idx])
+        out = process(path, already_bev, bin_names[bin_idx], det_names[det_idx], pp)
         if out is None:
             idx = (idx + 1) % len(paths)
             continue
@@ -324,7 +369,7 @@ def main():
 
         cv2.imshow(WINDOW,
                    build_panel(out, already_bev, bin_names[bin_idx], det_names[det_idx],
-                               info, gt.get(bev_key(name, already_bev)), args.scale))
+                               info, gt.get(cfg.bev_key(name, already_bev)), args.scale))
 
         key = cv2.waitKey(PLAY_DELAY_MS if auto_play else 0) & 0xFF
 

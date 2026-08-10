@@ -54,6 +54,30 @@ def curve_points(fit, y_from, y_to, x_offset=0, y_offset=0, step=4):
     return np.stack([xs, ys + y_offset], axis=1)
 
 
+# -----------------------------
+# 2b) BEV 픽셀 <-> 차량 좌표 (cm)
+# -----------------------------
+# 차량 좌표계: 원점 = 뒤축 중심, X = 전방(+), Y = 좌측(+).
+# BEV 는 y 가 아래로 갈수록 차에 가까우므로 X 는 (H-1 - y) 에 비례한다.
+# x 와 y 의 cm 환산 계수가 다른 이유는, dst 사각형을 640x480 전체로 잡아
+# BEV 를 만들었기 때문이다 (실세계 영역의 가로:세로 비와 무관하게 4:3 으로 강제).
+
+def bev_to_vehicle(x_px, y_px, metric=None):
+    """BEV 픽셀 -> (X 전방 cm, Y 좌측 cm). 스칼라와 배열 모두 받는다."""
+    m = metric if metric is not None else cfg.get_metric()
+    X = m.rear_axle_offset_cm + (cfg.H - 1 - np.asarray(y_px, float)) / m.px_per_cm_y
+    Y = (m.vehicle_center_x_px - np.asarray(x_px, float)) / m.px_per_cm_x
+    return X, Y
+
+
+def vehicle_to_bev(X_cm, Y_cm, metric=None):
+    """(X 전방 cm, Y 좌측 cm) -> BEV 픽셀. 원호를 그리는 데 쓴다."""
+    m = metric if metric is not None else cfg.get_metric()
+    x_px = m.vehicle_center_x_px - np.asarray(Y_cm, float) * m.px_per_cm_x
+    y_px = (cfg.H - 1) - (np.asarray(X_cm, float) - m.rear_axle_offset_cm) * m.px_per_cm_y
+    return x_px, y_px
+
+
 def load_bev(path, src_pts=None, already_bev=False):
     """이미지를 읽어 BEV를 돌려준다.
 
