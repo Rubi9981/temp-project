@@ -112,15 +112,13 @@ def drive_worker():
                 time.sleep(0.01)
                 continue
 
-            # 채널 규격 정규화 (RGBA -> BGR 또는 RGB)
+            # 채널 규격 정규화 (afb1.camera.get_image()는 RGB 형식을 반환하므로 OpenCV BGR 표준으로 변환)
             if len(frame.shape) == 3 and frame.shape[2] == 4:
-                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
             elif not IS_RASPI:
                 frame_bgr = frame.copy()
             else:
-                # afb1.camera.get_image()는 기본적으로 RGB/BGR 포맷 반환
-                # 주행 모델 처리를 위해 BGR 기준 복사
-                frame_bgr = frame.copy()
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
             h, w = frame_bgr.shape[:2]
             pred_label = "MANUAL"
