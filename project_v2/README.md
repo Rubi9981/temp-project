@@ -134,25 +134,48 @@ x와 y의 cm 환산 계수가 다른 이유는 dst 사각형을 640×480 전체�
 `flask.imshow`.
 
 ```bash
-python3 drive.py --replay ../project/captures   # 0) 하드웨어 없이 임포트/로직 확인
-python3 drive.py --dry-run --preview            # 1) 모터 끈 채 조향만 확인
-python3 drive.py --speed 60 --record run1       # 2) 실제 주행 + 프레임 녹화
-python3 review.py --src run1 --sort worst       # 3) 주행분을 오프라인에서 정밀 검토
+python3 drive.py --replay ../project/captures --no-web   # 0) 하드웨어 없이 로직 확인
+python3 drive.py --dry-run                               # 1) 모터 끈 채 조향만 확인
+python3 drive.py --speed 40 --record run1                # 2) 실제 주행 + 녹화
+python3 review.py --src run1 --sort worst                # 3) 오프라인 정밀 검토
 ```
 
 **기본은 모터 정지다.** `--speed` 를 명시해야 움직인다.
 서보가 반대로 돌면 `--invert-servo`.
 
-### 디버그 창을 따로 만들지 않은 이유
+### 웹 디버그 대시보드
 
-`--preview` 가 `afb1.flask.imshow` 로 최소 오버레이(중심선/목표점/servo/fps)를
-쏜다. 그 이상은 만들지 않았다.
+주행하면 **자체 Flask 서버가 함께 뜬다** (기본 5000번, `--port` 로 변경).
+
+```
+http://<Pi주소>:5000
+```
+
+`afb1.flask` 는 쓰지 않는다 — 이름/포트/동작을 확인할 수 없어 화면이 안 뜰
+위험이 있다. 직접 띄우면 주소를 우리가 안다.
+
+| 경로 | 내용 |
+|---|---|
+| `/` | 대시보드 (영상 + 상태표 + 버튼). HTML 인라인이라 templates/ 불필요 |
+| `/video_feed` | MJPEG 스트림 |
+| `/api/status` | JSON 텔레메트리 (mode/fps/servo/motor/status/frames) |
+| `/api/control` | POST `{"action": "run"\|"stop"\|"estop"\|"capture"}` |
+
+화면 위 HUD: ROI 박스, 좌우 차선 다항식, **노란 중심선**, **자홍색 목표점**,
+MODE/FPS/SERVO/MOTOR, 검출 상태, 하단 **조향 게이지 바**.
+
+**브라우저에서 즉시 정지할 수 있다** — Ctrl+C 로 터미널을 찾는 것보다 빠르다.
+EMERGENCY STOP 은 모터를 세우고 서보를 중립(90)으로 되돌린다.
+
+`--window` 를 주면 `cv2.imshow` 창도 함께 띄운다 (모니터/VNC 가 있을 때).
+`--no-web` 이면 웹 없이 터미널 로그만.
+
+### 라이브 화면만으로는 부족하다
 
 30fps 로 흘러가는 화면으로는 "왜 저 프레임에서 틀렸는지"를 볼 수 없다.
-**`--record` 로 저장해 두고 `review.py` 로 한 장씩 넘겨보는 쪽이 훨씬 낫다** —
-좌우 다항식, 슬라이딩 윈도우, 정답 라벨, Pure Pursuit 원호가 전부 겹쳐 나오고
-`--sort worst` 로 실패 프레임부터 볼 수 있다. 매 프레임 오버레이를 그리는
-비용도 제어 루프가 쓸 CPU 다.
+**`--record` 로 저장해 두고 `review.py` 로 한 장씩 넘겨보는 쪽이 진단에 낫다** —
+슬라이딩 윈도우, 마스크, 정답 라벨, 원본 역투영까지 겹쳐 나오고
+`--sort worst` 로 실패 프레임부터 볼 수 있다.
 
 녹화 파일은 `captures/` 와 같은 형식(채널 스왑 후 640×480)이라 `review.py`
 `evaluate.py` 가 그대로 처리한다. 덤으로 **시간축 추적에 필요한 연속 주행
