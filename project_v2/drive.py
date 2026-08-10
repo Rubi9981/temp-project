@@ -19,8 +19,14 @@ afb1 API 는 raspi/ 예제에서 확인된 것만 쓴다:
     python3 drive.py --speed 40 --record run1       # 주행 + 녹화 (웹 자동 활성)
     python3 drive.py --replay ../project/captures   # 하드웨어 없이 로직 검증
 
+주행 모드 (웹에서 전환):
+    AUTO   — Pure Pursuit 자율주행
+    MANUAL — 방향키/화면 버튼으로 직접 조종 (인지는 계속 돌아 화면은 살아 있다)
+    STOP   — 모터 정지
+
 안전:
-    - 기본은 모터 정지. --speed 를 명시해야 움직인다
+    - 웹이 켜져 있으면 STOP 으로 시작한다. 실행하자마자 차가 나가지 않는다
+    - AUTO 속도는 --speed 를 명시해야 0 이 아니다
     - 웹에서 STOP / 비상정지 버튼으로 즉시 세울 수 있다
     - 연속 MAX_FAIL_FRAMES 프레임 검출 실패 시 자동 정지
     - Ctrl+C / 예외 / 정상 종료 어느 쪽이든 finally 에서 stop_all()
@@ -164,7 +170,9 @@ def overlay(warped, y_start, res, ctrl, tel):
         cv2.circle(vis, (int(gx), int(gy)), 8, (255, 0, 255), -1)
 
     # 좌상단 상태
-    mode_color = {'RUN': (0, 255, 0), 'STOP': (0, 0, 255)}.get(tel['mode'], (0, 200, 255))
+    mode_color = {'AUTO': (0, 255, 0),
+                  'MANUAL': (0, 200, 255),
+                  'STOP': (0, 0, 255)}.get(tel['mode'], (200, 200, 200))
     rows = [
         (f"MODE: {tel['mode']}", mode_color),
         (f"FPS: {tel['fps']:.1f}", (200, 200, 200)),
@@ -209,8 +217,19 @@ def overlay(warped, y_start, res, ctrl, tel):
 # 주행 루프
 # ==============================================================================
 class Driver:
+    """주행 상태 기계.
+
+    모드는 세 가지다.
+        AUTO   — Pure Pursuit 자율주행
+        MANUAL — 웹에서 방향키/버튼으로 직접 조종 (인지는 계속 돌아 화면은 살아 있다)
+        STOP   — 모터 정지
+
+    하드웨어는 주행 스레드와 웹 스레드가 함께 만지므로 hw_lock 으로 직렬화한다.
+    """
+
     def __init__(self, hw, pp, bin_fn, det_fn, speed,
-                 max_fail=None, ema_alpha=None, invert_servo=False):
+                 max_fail=None, ema_alpha=None, invert_servo=False,
+                 manual_speed=None, mode='AUTO'):
         self.hw = hw
         self.pp = pp
         self.bin_fn = bin_fn
@@ -219,13 +238,43 @@ class Driver:
         self.max_fail = cfg.MAX_FAIL_FRAMES if max_fail is None else max_fail
         self.alpha = cfg.SERVO_EMA_ALPHA if ema_alpha is None else ema_alpha
         self.invert_servo = invert_servo
+        self.manual_speed = cfg.DRIVE_SPEED if manual_speed is None else manual_speed
 
-        self.mode = 'RUN'           # 'RUN' | 'STOP' — 웹에서 바꾼다
+        self.hw_lock = threading.Lock()
+        self.mode = mode                    # 'AUTO' | 'MANUAL' | 'STOP'
         self.servo_cmd = float(cfg.SERVO_CENTER)
         self.motor_cmd = 0
         self.fail_streak = 0
         self.stopped = False
         self.stats = {'frames': 0, 'ok': 0, 'fail': 0, 'halt': 0}
+
+    # -----------------------------
+    # 하드웨어 출력 (양쪽 스레드가 공유)
+    # -----------------------------
+    def apply_servo(self, angle):
+        # 내부 상태는 실수로 둔다. 정수로 반올림해 보관하면 EMA 가 매 프레임
+        # 양자화되어 평활 결과가 미세하게 달라진다.
+        self.servo_cmd = float(np.clip(angle, cfg.SERVO_MIN, cfg.SERVO_MAX))
+        with self.hw_lock:
+            self.hw.servo(int(round(self.servo_cmd)))
+
+    def apply_motor(self, speed):
+        self.motor_cmd = int(speed)
+        with self.hw_lock:
+            self.hw.motor(int(speed))
+
+    def set_mode(self, mode):
+        """모드 전환. 어느 방향이든 일단 모터를 세우고 들어간다."""
+        if mode not in ('AUTO', 'MANUAL', 'STOP'):
+            return False
+        self.mode = mode
+        self.apply_motor(0)
+        if mode == 'AUTO':
+            self.fail_streak = 0
+            self.stopped = False
+        elif mode == 'MANUAL':
+            self.apply_servo(cfg.SERVO_CENTER)
+        return True
 
     def step(self, frame):
         """한 프레임 처리. (ctrl, warped, res, y_start) 를 돌려준다."""
@@ -239,8 +288,11 @@ class Driver:
 
         if self.mode == 'STOP':
             # 인지는 계속 돌린다 — 화면은 살아 있어야 상태를 볼 수 있다
-            self.motor_cmd = 0
-            self.hw.motor(0)
+            self.apply_motor(0)
+            return ctrl, warped, res, y_start
+
+        if self.mode == 'MANUAL':
+            # 조향/구동은 웹 핸들러가 직접 넣는다. 여기서는 건드리지 않는다.
             return ctrl, warped, res, y_start
 
         if ctrl.ok:
@@ -251,10 +303,9 @@ class Driver:
             target = ctrl.servo
             if self.invert_servo:
                 target = 2 * cfg.SERVO_CENTER - target
-            self.servo_cmd += self.alpha * (target - self.servo_cmd)
-            self.motor_cmd = self.speed
-            self.hw.servo(round(self.servo_cmd))
-            self.hw.motor(self.speed)
+            smoothed = self.servo_cmd + self.alpha * (target - self.servo_cmd)
+            self.apply_servo(smoothed)
+            self.apply_motor(self.speed)
         else:
             self.stats['fail'] += 1
             self.fail_streak += 1
@@ -265,13 +316,11 @@ class Driver:
                     self.stats['halt'] += 1
                     print(f'  [정지] 연속 {self.fail_streak}프레임 검출 실패')
                 self.stopped = True
-                self.motor_cmd = 0
-                self.hw.motor(0)
+                self.apply_motor(0)
             else:
                 # 짧은 끊김은 직전 명령을 유지하고 넘어간다
-                self.motor_cmd = self.speed
-                self.hw.servo(round(self.servo_cmd))
-                self.hw.motor(self.speed)
+                self.apply_servo(self.servo_cmd)
+                self.apply_motor(self.speed)
 
         return ctrl, warped, res, y_start
 
@@ -285,7 +334,7 @@ class Shared:
         self.jpeg = None            # 최신 HUD 프레임 (JPEG bytes)
         self.raw = None             # 최신 원본 프레임 (캡처 저장용)
         self.running = True
-        self.tel = {'mode': 'RUN', 'fps': 0.0, 'servo': cfg.SERVO_CENTER,
+        self.tel = {'mode': 'STOP', 'fps': 0.0, 'servo': cfg.SERVO_CENTER,
                     'motor': 0, 'status': 'IDLE', 'halted': False, 'frames': 0}
 
 
@@ -306,8 +355,13 @@ PAGE = """
  td:first-child{color:#888}
  button{font-size:15px;padding:10px 16px;margin:4px 4px 0 0;border:0;
         border-radius:6px;color:#fff;cursor:pointer}
- .run{background:#1a7f37}.stop{background:#8b6b00}.estop{background:#b62324}
- .cap{background:#30363d}
+ .auto{background:#1a7f37}.manual{background:#1f6feb}.stop{background:#8b6b00}
+ .estop{background:#b62324}.cap{background:#30363d}
+ button.on{outline:3px solid #fff}
+ #pad{margin-top:14px}
+ #pad button{width:74px;height:56px;font-size:22px;background:#30363d}
+ #pad.off{opacity:.35;pointer-events:none}
+ .hint{color:#888;font-size:13px;margin-top:8px;line-height:1.5}
 </style></head><body>
 <h1>Lane Tracer — live debug</h1>
 <div class="wrap">
@@ -322,23 +376,66 @@ PAGE = """
       <tr><td>FRAMES</td><td id="frames">-</td></tr>
     </table>
     <div>
-      <button class="run"   onclick="cmd('run')">START</button>
-      <button class="stop"  onclick="cmd('stop')">STOP</button>
+      <button class="auto"   id="b_AUTO"   onclick="setMode('AUTO')">AUTO</button>
+      <button class="manual" id="b_MANUAL" onclick="setMode('MANUAL')">MANUAL</button>
+      <button class="stop"   id="b_STOP"   onclick="setMode('STOP')">STOP</button>
     </div>
     <div>
       <button class="estop" onclick="cmd('estop')">EMERGENCY STOP</button>
       <button class="cap"   onclick="cmd('capture')">CAPTURE</button>
     </div>
+
+    <div id="pad" class="off">
+      <div style="text-align:center">
+        <button data-k="ArrowUp">&#9650;</button></div>
+      <div style="text-align:center">
+        <button data-k="ArrowLeft">&#9664;</button>
+        <button data-k="ArrowDown">&#9660;</button>
+        <button data-k="ArrowRight">&#9654;</button></div>
+      <div class="hint">MANUAL 모드에서만 동작합니다.<br>
+        키보드 방향키로도 조종할 수 있습니다 (누르는 동안만).</div>
+    </div>
   </div>
 </div>
 <script>
-function cmd(a){fetch('/api/control',{method:'POST',
-  headers:{'Content-Type':'application/json'},body:JSON.stringify({action:a})});}
+function post(body){return fetch('/api/control',{method:'POST',
+  headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
+function cmd(a){return post({action:a});}
+function setMode(m){return post({action:'set_mode',mode:m});}
+function keyDown(k){return post({action:'key_down',key:k});}
+function keyUp(k){return post({action:'key_up',key:k});}
+
+// 화면 버튼 — 누르는 동안 유지
+for(const b of document.querySelectorAll('#pad button')){
+  const k=b.dataset.k;
+  const down=e=>{e.preventDefault();keyDown(k);};
+  const up=e=>{e.preventDefault();keyUp(k);};
+  b.addEventListener('mousedown',down); b.addEventListener('mouseup',up);
+  b.addEventListener('mouseleave',up);
+  b.addEventListener('touchstart',down,{passive:false});
+  b.addEventListener('touchend',up,{passive:false});
+}
+
+// 키보드 방향키. 오토리피트로 중복 전송되지 않게 눌린 키를 추적한다.
+const held=new Set();
+const KEYS=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
+addEventListener('keydown',e=>{
+  if(!KEYS.includes(e.key)||held.has(e.key))return;
+  e.preventDefault(); held.add(e.key); keyDown(e.key);});
+addEventListener('keyup',e=>{
+  if(!KEYS.includes(e.key))return;
+  e.preventDefault(); held.delete(e.key); keyUp(e.key);});
+// 탭을 벗어나면 눌린 키를 모두 놓아준다 (키업을 놓치면 계속 달린다)
+addEventListener('blur',()=>{for(const k of held)keyUp(k); held.clear();});
+
 setInterval(async()=>{
   const r=await fetch('/api/status'); const s=await r.json();
   for(const k of ['mode','servo','motor','status','frames'])
     document.getElementById(k).textContent=s[k];
   document.getElementById('fps').textContent=s.fps.toFixed(1);
+  for(const m of ['AUTO','MANUAL','STOP'])
+    document.getElementById('b_'+m).classList.toggle('on',s.mode===m);
+  document.getElementById('pad').classList.toggle('off',s.mode!=='MANUAL');
 },300);
 </script></body></html>
 """
@@ -380,30 +477,57 @@ def make_app(shared, driver, save_dir):
 
     @app.route('/api/control', methods=['POST'])
     def api_control():
-        action = (request.get_json(silent=True) or {}).get('action')
+        data = request.get_json(silent=True) or {}
+        action = data.get('action')
 
-        if action == 'run':
-            driver.mode = 'RUN'
-            driver.fail_streak = 0
-            driver.stopped = False
-        elif action in ('stop', 'estop'):
-            driver.mode = 'STOP'
-            try:
-                driver.hw.motor(0)
-                if action == 'estop':
-                    driver.servo_cmd = float(cfg.SERVO_CENTER)
-                    driver.hw.servo(cfg.SERVO_CENTER)
-            except Exception as exc:
-                print(f'[web] 정지 명령 실패: {exc}')
-            print(f'  [web] {action.upper()}')
-        elif action == 'capture':
-            with shared.lock:
-                raw = None if shared.raw is None else shared.raw.copy()
-            if raw is not None:
-                os.makedirs(save_dir, exist_ok=True)
-                path = os.path.join(save_dir, f'cap_{time.strftime("%Y%m%d_%H%M%S")}.jpg')
-                cv2.imwrite(path, raw)
-                print(f'  [web] 캡처 저장: {path}')
+        try:
+            if action == 'set_mode':
+                mode = str(data.get('mode', '')).upper()
+                if not driver.set_mode(mode):
+                    return jsonify({'ok': False, 'reason': f'unknown mode {mode!r}',
+                                    'mode': driver.mode}), 400
+                print(f'  [web] 모드 -> {mode}')
+
+            elif action == 'estop':
+                driver.set_mode('STOP')
+                driver.apply_servo(cfg.SERVO_CENTER)
+                print('  [web] EMERGENCY STOP')
+
+            elif action in ('key_down', 'key_up'):
+                # 수동 조종은 MANUAL 에서만. 자율주행 중 오조작을 막는다.
+                if driver.mode != 'MANUAL':
+                    return jsonify({'ok': False, 'reason': 'not MANUAL',
+                                    'mode': driver.mode})
+                key = data.get('key')
+                if action == 'key_down':
+                    if key == 'ArrowUp':
+                        driver.apply_motor(driver.manual_speed)
+                    elif key == 'ArrowDown':
+                        driver.apply_motor(-driver.manual_speed)
+                    elif key == 'ArrowLeft':
+                        driver.apply_servo(cfg.SERVO_MIN)
+                    elif key == 'ArrowRight':
+                        driver.apply_servo(cfg.SERVO_MAX)
+                else:
+                    # 키를 떼면 중립으로 — 놓친 key_up 때문에 계속 달리지 않게
+                    if key in ('ArrowUp', 'ArrowDown'):
+                        driver.apply_motor(0)
+                    elif key in ('ArrowLeft', 'ArrowRight'):
+                        driver.apply_servo(cfg.SERVO_CENTER)
+
+            elif action == 'capture':
+                with shared.lock:
+                    raw = None if shared.raw is None else shared.raw.copy()
+                if raw is not None:
+                    os.makedirs(save_dir, exist_ok=True)
+                    path = os.path.join(
+                        save_dir, f'cap_{time.strftime("%Y%m%d_%H%M%S")}.jpg')
+                    cv2.imwrite(path, raw)
+                    print(f'  [web] 캡처 저장: {path}')
+
+        except Exception as exc:                # 웹 요청 하나가 서버를 죽이면 안 된다
+            print(f'[web] 명령 처리 실패 ({action}): {exc}')
+            return jsonify({'ok': False, 'mode': driver.mode}), 500
 
         return jsonify({'ok': True, 'mode': driver.mode})
 
@@ -482,8 +606,8 @@ def run_loop(hw, driver, shared, args):
     finally:
         shared.running = False
         try:
-            hw.motor(0)
-            hw.servo(cfg.SERVO_CENTER)
+            driver.apply_motor(0)
+            driver.apply_servo(cfg.SERVO_CENTER)
         except Exception:
             pass
 
@@ -521,6 +645,8 @@ def main():
     ap.add_argument('--max-fail', type=int, default=cfg.MAX_FAIL_FRAMES)
     ap.add_argument('--ema', type=float, default=cfg.SERVO_EMA_ALPHA,
                     help='서보 평활 계수. 1.0 = 평활 없음')
+    ap.add_argument('--manual-speed', type=int, default=cfg.DRIVE_SPEED,
+                    help='MANUAL 모드에서 전진/후진 속도')
     # 디버그 화면
     ap.add_argument('--no-web', action='store_true', help='웹 대시보드 끄기')
     ap.add_argument('--port', type=int, default=5000)
@@ -566,10 +692,14 @@ def main():
 
     pp = control.PurePursuit(metric=metric, lookahead_cm=args.lookahead,
                              servo_per_deg=args.steer_gain)
+    # 웹이 있으면 STOP 으로 시작한다 — 실행하자마자 차가 나가지 않게.
+    # 웹이 없으면 켤 방법이 없으므로 AUTO 로 시작한다.
+    initial_mode = 'STOP' if args.web else 'AUTO'
     driver = Driver(hw, pp,
                     binarize.BACKENDS[args.binarize],
                     detect.DETECTORS[args.detect],
-                    speed, args.max_fail, args.ema, args.invert_servo)
+                    speed, args.max_fail, args.ema, args.invert_servo,
+                    manual_speed=args.manual_speed, mode=initial_mode)
     shared = Shared()
 
     if args.record:
@@ -577,9 +707,11 @@ def main():
         print(f'[record] {args.record}/ 에 저장 (매 {args.record_every}프레임)')
 
     print(f'binarize={args.binarize} detect={args.detect} Ld={args.lookahead}cm '
-          f'speed={speed} ema={args.ema} steer_gain={args.steer_gain:.2f}')
+          f'speed={speed} manual_speed={args.manual_speed} ema={args.ema} '
+          f'steer_gain={args.steer_gain:.2f}')
+    print(f'시작 모드: {initial_mode}')
     if speed == 0:
-        print('모터 속도 0 — 조향만 계산합니다. 주행하려면 --speed 를 주세요.')
+        print('AUTO 속도 0 — 조향만 계산합니다. 자율주행하려면 --speed 를 주세요.')
 
     t0 = time.time()
 
@@ -596,7 +728,9 @@ def main():
         print()
         print('=' * 52)
         print(f'  웹 디버그 화면: http://<Pi주소>:{args.port}')
-        print('  START / STOP / EMERGENCY STOP / CAPTURE 버튼 제공')
+        print('  AUTO / MANUAL / STOP 전환, 비상정지, 캡처 버튼 제공')
+        print('  MANUAL 에서는 방향키(또는 화면 버튼)로 직접 조종합니다')
+        print('  안전을 위해 STOP 으로 시작합니다 — 웹에서 AUTO 를 누르세요')
         print('=' * 52)
         print('Ctrl+C 로 종료\n')
         try:

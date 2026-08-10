@@ -159,13 +159,44 @@ http://<Pi주소>:5000
 | `/` | 대시보드 (영상 + 상태표 + 버튼). HTML 인라인이라 templates/ 불필요 |
 | `/video_feed` | MJPEG 스트림 |
 | `/api/status` | JSON 텔레메트리 (mode/fps/servo/motor/status/frames) |
-| `/api/control` | POST `{"action": "run"\|"stop"\|"estop"\|"capture"}` |
+| `/api/control` | POST — 아래 참조 |
 
 화면 위 HUD: ROI 박스, 좌우 차선 다항식, **노란 중심선**, **자홍색 목표점**,
 MODE/FPS/SERVO/MOTOR, 검출 상태, 하단 **조향 게이지 바**.
 
-**브라우저에서 즉시 정지할 수 있다** — Ctrl+C 로 터미널을 찾는 것보다 빠르다.
-EMERGENCY STOP 은 모터를 세우고 서보를 중립(90)으로 되돌린다.
+### 주행 모드 — 웹에서 전환
+
+| 모드 | 동작 |
+|---|---|
+| **AUTO** | Pure Pursuit 자율주행 |
+| **MANUAL** | 방향키(또는 화면 버튼)로 직접 조종. 인지는 계속 돌아 화면은 살아 있다 |
+| **STOP** | 모터 정지. 인지는 계속 |
+
+MANUAL 조작은 `ArrowUp`(전진) / `ArrowDown`(후진) / `ArrowLeft` / `ArrowRight`.
+**누르는 동안만** 유효하고 떼면 중립으로 돌아간다. 브라우저 탭을 벗어나도
+눌린 키를 모두 놓아준다 — key_up 을 놓치면 계속 달리기 때문이다.
+
+`/api/control` 은 다음을 받는다:
+
+```json
+{"action":"set_mode","mode":"AUTO"|"MANUAL"|"STOP"}
+{"action":"key_down","key":"ArrowUp"}     // MANUAL 에서만
+{"action":"key_up","key":"ArrowUp"}
+{"action":"estop"}
+{"action":"capture"}
+```
+
+**AUTO 중에는 수동키가 서버에서 거부된다** (`ok:false, reason:"not MANUAL"`).
+자율주행 중 실수로 방향키를 눌러도 조향이 흔들리지 않는다.
+
+### 안전 설계
+
+- **웹이 켜져 있으면 STOP 으로 시작한다.** 실행하자마자 차가 나가지 않는다.
+  `--no-web` 일 때만 AUTO 로 시작한다 (켤 방법이 없으므로)
+- 모드 전환은 **어느 방향이든 일단 모터를 세우고** 들어간다
+- EMERGENCY STOP 은 모터 정지 + 서보 중립(90) 복귀
+- 하드웨어 출력은 주행 스레드와 웹 스레드가 공유하므로 `Driver.hw_lock` 으로
+  직렬화한다. 두 스레드가 동시에 `servo()`/`motor()` 를 호출하지 않는다
 
 `--window` 를 주면 `cv2.imshow` 창도 함께 띄운다 (모니터/VNC 가 있을 때).
 `--no-web` 이면 웹 없이 터미널 로그만.
