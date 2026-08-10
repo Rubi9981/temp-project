@@ -1,0 +1,32 @@
+# 기본적으로 전부 무시
+*
+
+# 디렉토리는 무시하지 않음 (하위의 .py를 찾아 들어가기 위해 필요)
+!*/
+
+# 파이썬 소스코드만 추적
+!*.py
+
+# 설정/문서 파일
+!*.json
+!*.md
+!*.txt
+!*.yaml
+!*.yml
+!*.toml
+!*.cfg
+
+# Flask 템플릿/정적 파일 (L_5_Capture.py의 templates/index.html 등)
+!*.html
+!*.css
+!*.js
+
+# 이 파일 자체는 추적
+!.gitignore
+
+# 가상환경/캐시 안의 .py는 위 규칙보다 우선해서 제외
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
