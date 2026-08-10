@@ -28,8 +28,17 @@ afb1 API 는 raspi/ 예제에서 확인된 것만 쓴다:
 import argparse
 import dataclasses
 import os
+import sys
 import threading
 import time
+
+# project_v2 모듈(bev, binarize, config, detect, control) 경로 추가
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_V2_DIR = os.path.abspath(os.path.join(CURRENT_DIR, '..', 'project_v2'))
+PROJECT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, '..', 'project'))
+for p in [PROJECT_V2_DIR, PROJECT_DIR]:
+    if p not in sys.path and os.path.exists(p):
+        sys.path.insert(0, p)
 
 import cv2
 import numpy as np
@@ -37,7 +46,10 @@ import numpy as np
 import bev as bevlib
 import binarize
 import config as cfg
-import control
+try:
+    import control
+except ImportError:
+    control = None
 import detect
 
 
