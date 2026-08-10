@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>자율주행 카트 실시간 모니터링 & 관제 대시보드</title>
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --card-border: #334155;
+            --accent-primary: #3b82f6;
+            --accent-success: #10b981;
+            --accent-warning: #f59e0b;
+            --accent-danger: #ef4444;
+            --text-main: #f8fafc;
+            --text-sub: #94a3b8;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Pretendard', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--card-border);
+            margin-bottom: 20px;
+        }
+
+        .header-title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .header-title h1 {
+            font-size: 1.5rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #60a5fa, #a855f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .badge-live {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--accent-danger);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+        }
+
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--accent-danger);
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); opacity: 0.8; }
+            50% { transform: scale(1.3); opacity: 1; }
+            100% { transform: scale(0.95); opacity: 0.8; }
+        }
+
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr 340px;
+            gap: 20px;
+            flex: 1;
+        }
+
+        @media (max-width: 992px) {
+            .main-container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .video-card {
+            background-color: var(--card-bg);
+            border-radius: 16px;
+            border: 1px solid var(--card-border);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+        }
+
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            min-height: 440px;
+            background-color: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .video-wrapper img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            padding: 16px;
+        }
+
+        .card h2 {
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--text-sub);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .telemetry-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .telemetry-item {
+            background: rgba(15, 23, 42, 0.6);
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .telemetry-label {
+            font-size: 0.75rem;
+            color: var(--text-sub);
+            margin-bottom: 4px;
+        }
+
+        .telemetry-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+
+        .mode-auto { color: var(--accent-success); }
+        .mode-manual { color: var(--accent-warning); }
+        .mode-stop { color: var(--accent-danger); }
+
+        .control-buttons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .btn {
+            appearance: none;
+            border: none;
+            padding: 12px;
+            border-radius: 10px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.15s ease-in-out;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 6px;
+            color: #fff;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            filter: brightness(1.1);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn-auto {
+            background: linear-gradient(135deg, #10b981, #059669);
+            grid-column: span 2;
+        }
+
+        .btn-manual {
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+        }
+
+        .btn-capture {
+            background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+        }
+
+        .btn-stop {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            grid-column: span 2;
+            padding: 16px;
+            font-size: 1.05rem;
+        }
+
+        .keyboard-guide {
+            font-size: 0.8rem;
+            color: var(--text-sub);
+            line-height: 1.6;
+        }
+
+        .key-badge {
+            background: #334155;
+            color: #f8fafc;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            border: 1px solid #475569;
+        }
+
+        .status-toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid var(--accent-primary);
+            color: var(--text-main);
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.3s ease;
+            pointer-events: none;
+            z-index: 1000;
+        }
+
+        .status-toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="header-title">
+            <h1>AFB-1 자율주행 카트 관제 시스템</h1>
+            <div class="badge-live">
+                <span class="live-dot"></span>
+                LIVE STREAM
+            </div>
+        </div>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: var(--text-sub);" id="clock-display">
+            00:00:00
+        </div>
+    </header>
+
+    <div class="main-container">
+        <!-- 비디오 피드 영역 -->
+        <div class="video-card">
+            <div class="video-wrapper">
+                <img id="stream-img" src="/video_feed" alt="라즈베리파이 카메라 실시간 스트림" onerror="this.src='/video_feed?t=' + new Date().getTime()">
+            </div>
+        </div>
+
+        <!-- 우측 컨트롤 및 텔레메트리 패널 -->
+        <div class="sidebar">
+            <!-- 텔레메트리 카드 -->
+            <div class="card">
+                <h2>카트 실시간 상태</h2>
+                <div class="telemetry-grid">
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">주행 모드</div>
+                        <div class="telemetry-value mode-auto" id="val-mode">AUTO</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">FPS</div>
+                        <div class="telemetry-value" id="val-fps">0.0</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">조향 각도</div>
+                        <div class="telemetry-value" id="val-servo">90°</div>
+                    </div>
+                    <div class="telemetry-item">
+                        <div class="telemetry-label">모터 속도</div>
+                        <div class="telemetry-value" id="val-motor">0</div>
+                    </div>
+                    <div class="telemetry-item" style="grid-column: span 2;">
+                        <div class="telemetry-label">AI 예측 / 상태</div>
+                        <div class="telemetry-value" id="val-pred" style="color: #38bdf8;">FORWARD (1.00)</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 제어 카드 -->
+            <div class="card">
+                <h2>주행 제어 & 액션</h2>
+                <div class="control-buttons">
+                    <button class="btn btn-auto" onclick="setMode('AUTO')">🤖 자율주행 시작 (AUTO)</button>
+                    <button class="btn btn-manual" onclick="setMode('MANUAL')">🎮 수동 제어</button>
+                    <button class="btn btn-capture" onclick="triggerCapture()">📸 화면 캡처</button>
+                    <button class="btn btn-stop" onclick="emergencyStop()">🛑 비상 정지 (STOP)</button>
+                </div>
+            </div>
+
+            <!-- 단축키 안내 -->
+            <div class="card">
+                <h2>단축키 안내</h2>
+                <div class="keyboard-guide">
+                    <p><span class="key-badge">Space</span> : 즉시 비상 정지</p>
+                    <p><span class="key-badge">A</span> : 자율주행 모드 (AUTO)</p>
+                    <p><span class="key-badge">M</span> : 수동 제어 모드 (MANUAL)</p>
+                    <p><span class="key-badge">C</span> : 스크린샷 캡처</p>
+                    <p><span class="key-badge">↑</span> / <span class="key-badge">↓</span> : 전진 / 후진 (수동)</p>
+                    <p><span class="key-badge">←</span> / <span class="key-badge">→</span> : 좌 / 우 조향 (수동)</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="status-toast">상태 메시지</div>
+
+    <script>
+        // 시계 표시
+        setInterval(() => {
+            const now = new Date();
+            document.getElementById('clock-display').innerText = now.toLocaleTimeString();
+        }, 1000);
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 2000);
+        }
+
+        // 텔레메트리 주기적 업데이트
+        async function updateTelemetry() {
+            try {
+                const res = await fetch('/api/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    
+                    const modeElem = document.getElementById('val-mode');
+                    modeElem.innerText = data.mode;
+                    modeElem.className = 'telemetry-value ' + 
+                        (data.mode === 'AUTO' ? 'mode-auto' : data.mode === 'MANUAL' ? 'mode-manual' : 'mode-stop');
+                    
+                    document.getElementById('val-fps').innerText = data.fps.toFixed(1);
+                    document.getElementById('val-servo').innerText = data.servo_angle + '°';
+                    document.getElementById('val-motor').innerText = data.motor_speed;
+                    document.getElementById('val-pred').innerText = data.prediction || '-';
+                }
+            } catch (err) {
+                // 네트워크 에러 시 무시
+            }
+        }
+        setInterval(updateTelemetry, 300);
+
+        // 명령 전송
+        async function sendCommand(url, data = {}) {
+            try {
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                return res;
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        function setMode(mode) {
+            sendCommand('/api/control', { action: 'set_mode', mode: mode });
+            showToast(`모드 변경: ${mode}`);
+        }
+
+        function emergencyStop() {
+            sendCommand('/api/control', { action: 'emergency_stop' });
+            showToast('🛑 비상 정지 명령 발송');
+        }
+
+        function triggerCapture() {
+            sendCommand('/api/control', { action: 'capture' });
+            showToast('📸 스크린샷 캡처 완료');
+        }
+
+        // 키보드 이벤트 리스너
+        window.addEventListener('keydown', (e) => {
+            if (e.repeat) return;
+
+            if (e.code === 'Space') {
+                e.preventDefault();
+                emergencyStop();
+            } else if (e.key === 'a' || e.key === 'A') {
+                setMode('AUTO');
+            } else if (e.key === 'm' || e.key === 'M') {
+                setMode('MANUAL');
+            } else if (e.key === 'c' || e.key === 'C') {
+                triggerCapture();
+            } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+                e.preventDefault();
+                sendCommand('/api/control', { action: 'key_down', key: e.code });
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+                sendCommand('/api/control', { action: 'key_up', key: e.code });
+            }
+        });
+    </script>
+</body>
+</html>
