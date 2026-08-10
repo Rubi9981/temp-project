@@ -40,7 +40,7 @@ import detect
 class Afb1Hardware:
     """실제 afb1 하드웨어."""
 
-    def __init__(self, preview=False):
+    def __init__(self, preview=False, preview_name='AFB Camera'):
         try:
             import afb1
         except ImportError as exc:
@@ -50,6 +50,9 @@ class Afb1Hardware:
             ) from exc
         self.afb1 = afb1
         self.preview = preview
+        # raspi/L_1_camera.py 가 쓰는 이름. afb1.flask 가 이름으로 스트림을
+        # 구분한다면 기존에 보던 링크와 같은 이름이어야 화면에 나온다.
+        self.preview_name = preview_name
 
         afb1.gpio.init()
         # raspi/L_5_Capture.py 가 주행 전에 호출한다. 모터 드라이버 standby 해제로
@@ -73,10 +76,21 @@ class Afb1Hardware:
         self.afb1.gpio.motor(int(speed))
 
     def show(self, name, image):
+        """afb1.flask 로 프레임을 쏜다.
+
+        추가 채널 변환을 하지 않는다. L_1_camera.py 는
+        cvtColor(get_image(), BGR2RGB) 를 flask.imshow 에 넘기는데,
+        read() 가 이미 같은 변환을 거친 배열을 돌려주므로 여기서 한 번 더
+        뒤집으면 원래대로 돌아가 색이 반대로 나온다.
+
+        다만 오버레이 색은 BGR 튜플로 그렸으므로 브라우저에서는 R/B 가
+        바뀌어 보인다 (노란 중심선이 하늘색으로). 배경 영상의 색을 제대로
+        보는 쪽이 판단에 중요해서 이렇게 뒀다.
+        """
         if not self.preview:
             return
         try:
-            self.afb1.flask.imshow(name, cv2.cvtColor(image, cv2.COLOR_BGR2RGB), 0)
+            self.afb1.flask.imshow(self.preview_name, image, 0)
         except Exception as exc:          # 미리보기 실패가 주행을 멈추면 안 된다
             self.preview = False
             print(f'[preview] 비활성화: {exc}')
@@ -234,7 +248,13 @@ def main():
     ap.add_argument('--max-fail', type=int, default=cfg.MAX_FAIL_FRAMES)
     ap.add_argument('--ema', type=float, default=cfg.SERVO_EMA_ALPHA,
                     help='서보 평활 계수. 1.0 = 평활 없음')
-    ap.add_argument('--preview', action='store_true', help='afb1.flask 로 원격 미리보기')
+    ap.add_argument('--preview', action='store_true',
+                    help='afb1.flask 로 원격 미리보기 (SSH 접속 상태에서 브라우저로 봄)')
+    ap.add_argument('--preview-name', default='AFB Camera',
+                    help='afb1.flask.imshow 에 넘길 이름. 기존에 보던 스트림과 '
+                         '같은 이름이어야 그 링크에 나온다 (L_1_camera.py 기본값)')
+    ap.add_argument('--window', action='store_true',
+                    help='cv2.imshow 로 창 띄우기 (Pi에 모니터/VNC 가 있을 때)')
     ap.add_argument('--invert-servo', action='store_true',
                     help='서보가 반대로 돌 때. --dry-run 으로 확인 후 사용')
     ap.add_argument('--steer-gain', type=float, default=cfg.SERVO_PER_DEG,
@@ -267,7 +287,7 @@ def main():
         hw = ReplayHardware(args.replay, loop=args.replay_loop)
         print(f'[replay] {len(hw.paths)}장 — 하드웨어 없이 루프 로직만 검증')
     else:
-        hw = Afb1Hardware(preview=args.preview)
+        hw = Afb1Hardware(preview=args.preview, preview_name=args.preview_name)
 
     pp = control.PurePursuit(metric=metric, lookahead_cm=args.lookahead,
                              servo_per_deg=args.steer_gain)
@@ -284,6 +304,10 @@ def main():
           f'speed={speed} ema={args.ema} steer_gain={args.steer_gain:.2f}')
     if speed == 0:
         print('모터 속도 0 — 조향만 계산합니다. 주행하려면 --speed 를 주세요.')
+    if args.preview:
+        print(f"[preview] afb1.flask 로 '{args.preview_name}' 이름으로 송출합니다.")
+    if args.window:
+        print('창 종료: q 또는 ESC')
     print('Ctrl+C 로 종료\n')
 
     t0 = time.time()
@@ -300,9 +324,15 @@ def main():
             n = driver.stats['frames']
             fps_now = n / max(time.time() - t0, 1e-6)
 
-            if args.preview:
-                hw.show('lane', overlay(warped, y_start, res, ctrl,
-                                        driver.servo_cmd, fps_now))
+            if args.preview or args.window:
+                vis = overlay(warped, y_start, res, ctrl, driver.servo_cmd, fps_now)
+                if args.preview:
+                    hw.show('lane', vis)
+                if args.window:
+                    cv2.imshow('drive', vis)
+                    if (cv2.waitKey(1) & 0xFF) in (27, ord('q')):
+                        print('\n창에서 종료')
+                        break
 
             # 저장 형식을 captures/ 와 똑같이 맞춘다 (채널 스왑 후 640x480).
             # 그래야 review.py / evaluate.py 가 동일하게 처리한다.
@@ -328,6 +358,8 @@ def main():
             hw.servo(cfg.SERVO_CENTER)
         except Exception:
             pass
+        if args.window:
+            cv2.destroyAllWindows()
         hw.shutdown()
 
         s = driver.stats
