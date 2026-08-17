@@ -33,6 +33,7 @@ import os
 import cv2
 import numpy as np
 
+import _path  # noqa: F401  — 상위 폴더를 import 경로에 추가 (아래 형제 모듈용)
 import bev as bevlib
 import binarize
 import config as cfg

@@ -1,18 +1,21 @@
-"""라즈베리파이 실시간 주행 루프 + 웹 디버그 대시보드.
+"""라즈베리파이 실시간 주행 루프 + 웹 디버그 대시보드 — 진입점.
 
     afb1.camera.get_image()
       -> 채널 스왑 -> BEV warp -> 이진화 -> 슬라이딩 윈도우 -> 중심선
       -> Pure Pursuit -> afb1.gpio.servo() / motor()
+
+이 파일은 인자 파싱과 조립만 한다. 실제 동작은 아래 네 모듈에 있다.
+
+    hardware.py  Afb1Hardware / ReplayHardware — read/servo/motor/shutdown
+    driver.py    Driver — 주행 상태 기계 (AUTO / MANUAL / STOP)
+    loop.py      Shared / Profiler / run_loop / print_summary
+    webui.py     PAGE / make_app — Flask 대시보드 (HUD 그리기는 hud.py)
 
 디버그 화면은 **자체 Flask 서버**로 띄운다 (raspi/L_5_Capture.py 방식).
 afb1.flask 는 쓰지 않는다 — 동작을 확인할 수 없어 화면이 안 뜰 위험이 있고,
 직접 띄우면 주소와 포트를 우리가 안다.
 
     http://<Pi주소>:5000
-
-afb1 API 는 raspi/ 예제에서 확인된 것만 쓴다:
-    gpio.init() / gpio.stby(1) / gpio.servo(30~150) / gpio.motor(speed) / gpio.stop_all()
-    camera.init(w, h, fps) / camera.get_image() / camera.release_camera()
 
 사용:
     python3 drive.py --dry-run                      # 모터 끈 채 확인 (첫 브링업)
@@ -38,599 +41,15 @@ import threading
 import time
 
 import cv2
-import numpy as np
 
-import bev as bevlib
 import binarize
 import config as cfg
 import control
 import detect
-
-
-# ==============================================================================
-# 하드웨어 추상화
-# ==============================================================================
-class Afb1Hardware:
-    """실제 afb1 하드웨어."""
-
-    def __init__(self):
-        try:
-            import afb1
-        except ImportError as exc:
-            raise SystemExit(
-                'afb1 모듈을 찾을 수 없습니다. 이 스크립트는 라즈베리파이에서 실행해야 합니다.\n'
-                '개발 PC에서 루프 로직만 확인하려면: python3 drive.py --replay <이미지폴더>'
-            ) from exc
-        self.afb1 = afb1
-
-        afb1.gpio.init()
-        # raspi/L_5_Capture.py 가 주행 전에 호출한다. 모터 드라이버 standby 해제로
-        # 보이며, 빠뜨리면 모터가 돌지 않을 수 있다.
-        afb1.gpio.stby(1)
-        afb1.camera.init(cfg.W, cfg.H, cfg.CAMERA_FPS)
-
-    def read(self):
-        frame = self.afb1.camera.get_image()
-        if frame is None:
-            return None
-        if frame.ndim == 3 and frame.shape[2] == 4:      # RGBA 로 오는 경우 대비
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-        # raspi/L_5_Capture.py 가 저장 전에 하던 채널 스왑을 그대로 재현한다.
-        # captures/ 의 이미지는 이 스왑을 거친 뒤 imwrite 된 것이라, 여기서
-        # 똑같이 하지 않으면 오프라인에서 튜닝한 이진화가 다른 색을 보게 된다.
-        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-    def servo(self, angle):
-        self.afb1.gpio.servo(int(angle))
-
-    def motor(self, speed):
-        self.afb1.gpio.motor(int(speed))
-
-    def shutdown(self):
-        try:
-            self.afb1.gpio.stop_all()
-        finally:
-            try:
-                self.afb1.camera.release_camera()
-            except Exception:
-                pass
-
-
-class ReplayHardware:
-    """하드웨어 없이 저장 이미지를 먹여 루프 로직만 검증한다.
-
-    실차에서 확인할 수 없는 것(카메라, 서보, 모터)을 뺀 나머지 — 상태 기계,
-    실패 카운팅, 평활, 종료 처리 — 를 개발 PC에서 돌려볼 수 있게 한다.
-    """
-
-    def __init__(self, directory, loop=False):
-        import glob
-        self.paths = sorted(
-            p for p in glob.glob(os.path.join(directory, '*'))
-            if p.lower().endswith(('.jpg', '.jpeg', '.png'))
-        )
-        if not self.paths:
-            raise SystemExit(f'이미지가 없습니다: {directory}')
-        self.i = 0
-        self.loop = loop
-        self.commands = []          # (kind, value) 기록 — 사후 점검용
-
-    def read(self):
-        if self.i >= len(self.paths):
-            if not self.loop:
-                return None
-            self.i = 0
-        img = cv2.imread(self.paths[self.i])
-        self.i += 1
-        return img
-
-    def servo(self, angle):
-        self.commands.append(('servo', int(angle)))
-
-    def motor(self, speed):
-        self.commands.append(('motor', int(speed)))
-
-    def shutdown(self):
-        pass
-
-
-# ==============================================================================
-# HUD
-# ==============================================================================
-def overlay(warped, y_start, res, ctrl, tel):
-    """BEV 위에 주행 상태를 그린다.
-
-    cv2.putText 는 Hershey 폰트라 ASCII 만 그릴 수 있다.
-    """
-    vis = warped.copy()
-    h, w = vis.shape[:2]
-
-    # ROI 가이드 + 화면 중앙 기준선
-    cv2.rectangle(vis, (0, y_start), (w - 1, h - 1), (255, 120, 0), 2)
-    cv2.line(vis, (w // 2, y_start), (w // 2, h), (0, 0, 255), 1)
-
-    # 좌우 차선 다항식
-    for fit, color in ((res.fit_left, (255, 128, 0)), (res.fit_right, (0, 128, 255))):
-        if fit is not None:
-            pts = bevlib.curve_points(fit, 0, h - y_start,
-                                      y_offset=y_start).astype(np.int32)
-            cv2.polylines(vis, [pts], False, color, 2)
-
-    # 주행 목표 경로
-    if res.fit_center is not None:
-        pts = bevlib.curve_points(res.fit_center, 0, h - y_start,
-                                  y_offset=y_start).astype(np.int32)
-        cv2.polylines(vis, [pts], False, (0, 0, 0), 6)
-        cv2.polylines(vis, [pts], False, (0, 255, 255), 3)
-
-    # Pure Pursuit 목표점
-    if ctrl.ok:
-        gx, gy = ctrl.goal_bev
-        cv2.circle(vis, (int(gx), int(gy)), 10, (0, 0, 0), -1)
-        cv2.circle(vis, (int(gx), int(gy)), 8, (255, 0, 255), -1)
-
-    # 좌상단 상태
-    mode_color = {'AUTO': (0, 255, 0),
-                  'MANUAL': (0, 200, 255),
-                  'STOP': (0, 0, 255)}.get(tel['mode'], (200, 200, 200))
-    rows = [
-        (f"MODE: {tel['mode']}", mode_color),
-        (f"FPS: {tel['fps']:.1f}", (200, 200, 200)),
-        (f"SERVO: {tel['servo']}", (200, 200, 200)),
-        (f"MOTOR: {tel['motor']}", (200, 200, 200)),
-    ]
-    for i, (text, color) in enumerate(rows):
-        y = 28 + i * 26
-        cv2.putText(vis, text, (14, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
-        cv2.putText(vis, text, (14, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1,
-                    cv2.LINE_AA)
-
-    # 우상단 검출/제어 상태
-    if ctrl.ok:
-        status = f"{res.status.upper()}  d={ctrl.delta_deg:+.1f}deg  Ld={ctrl.lookahead_cm:.0f}cm"
-        status_color = (0, 255, 255)
-    else:
-        status = 'NO LANE'
-        status_color = (0, 0, 255)
-    if tel['halted']:
-        status = 'HALTED - ' + status
-        status_color = (0, 0, 255)
-    (tw, _), _ = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-    sx = max(w - tw - 14, 200)      # 좌상단 상태 열과 겹치지 않게
-    cv2.putText(vis, status, (sx, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
-    cv2.putText(vis, status, (sx, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 1,
-                cv2.LINE_AA)
-
-    # 하단 조향 게이지 — 서보 30~150 을 -100~+100 px 로 매핑
-    cx, gy = w // 2, h - 22
-    cv2.line(vis, (cx - 100, gy), (cx + 100, gy), (90, 90, 90), 3)
-    cv2.line(vis, (cx, gy - 7), (cx, gy + 7), (150, 150, 150), 2)
-    span = (cfg.SERVO_MAX - cfg.SERVO_MIN) / 2.0
-    offset = int((tel['servo'] - cfg.SERVO_CENTER) * (100.0 / span))
-    offset = int(np.clip(offset, -100, 100))
-    cv2.circle(vis, (cx + offset, gy), 9, (0, 0, 0), -1)
-    cv2.circle(vis, (cx + offset, gy), 7, (0, 255, 0), -1)
-    return vis
-
-
-# ==============================================================================
-# 주행 루프
-# ==============================================================================
-class Driver:
-    """주행 상태 기계.
-
-    모드는 세 가지다.
-        AUTO   — Pure Pursuit 자율주행
-        MANUAL — 웹에서 방향키/버튼으로 직접 조종 (인지는 계속 돌아 화면은 살아 있다)
-        STOP   — 모터 정지
-
-    하드웨어는 주행 스레드와 웹 스레드가 함께 만지므로 hw_lock 으로 직렬화한다.
-    """
-
-    def __init__(self, hw, pp, bin_fn, det_fn, speed,
-                 max_fail=None, ema_alpha=None, invert_servo=False,
-                 manual_speed=None, mode='AUTO'):
-        self.hw = hw
-        self.pp = pp
-        self.bin_fn = bin_fn
-        self.det_fn = det_fn
-        self.speed = speed
-        self.max_fail = cfg.MAX_FAIL_FRAMES if max_fail is None else max_fail
-        self.alpha = cfg.SERVO_EMA_ALPHA if ema_alpha is None else ema_alpha
-        self.invert_servo = invert_servo
-        self.manual_speed = cfg.DRIVE_SPEED if manual_speed is None else manual_speed
-
-        self.hw_lock = threading.Lock()
-        self.mode = mode                    # 'AUTO' | 'MANUAL' | 'STOP'
-        self.servo_cmd = float(cfg.SERVO_CENTER)
-        self.motor_cmd = 0
-        self.fail_streak = 0
-        self.stopped = False
-        self.stats = {'frames': 0, 'ok': 0, 'fail': 0, 'halt': 0}
-
-    # -----------------------------
-    # 하드웨어 출력 (양쪽 스레드가 공유)
-    # -----------------------------
-    def apply_servo(self, angle):
-        # 내부 상태는 실수로 둔다. 정수로 반올림해 보관하면 EMA 가 매 프레임
-        # 양자화되어 평활 결과가 미세하게 달라진다.
-        self.servo_cmd = float(np.clip(angle, cfg.SERVO_MIN, cfg.SERVO_MAX))
-        with self.hw_lock:
-            self.hw.servo(int(round(self.servo_cmd)))
-
-    def apply_motor(self, speed):
-        self.motor_cmd = int(speed)
-        with self.hw_lock:
-            self.hw.motor(int(speed))
-
-    def set_mode(self, mode):
-        """모드 전환. 어느 방향이든 일단 모터를 세우고 들어간다."""
-        if mode not in ('AUTO', 'MANUAL', 'STOP'):
-            return False
-        self.mode = mode
-        self.apply_motor(0)
-        if mode == 'AUTO':
-            self.fail_streak = 0
-            self.stopped = False
-        elif mode == 'MANUAL':
-            self.apply_servo(cfg.SERVO_CENTER)
-        return True
-
-    def step(self, frame):
-        """한 프레임 처리. (ctrl, warped, res, y_start) 를 돌려준다."""
-        self.stats['frames'] += 1
-
-        warped, _ = bevlib.warp_image(frame)
-        roi, y_start = bevlib.roi_of(warped)
-        mask = self.bin_fn(roi)
-        res = self.det_fn(mask)
-        ctrl = self.pp(res, roi.shape[0], y_start)
-
-        if self.mode == 'STOP':
-            # 인지는 계속 돌린다 — 화면은 살아 있어야 상태를 볼 수 있다
-            self.apply_motor(0)
-            return ctrl, warped, res, y_start
-
-        if self.mode == 'MANUAL':
-            # 조향/구동은 웹 핸들러가 직접 넣는다. 여기서는 건드리지 않는다.
-            return ctrl, warped, res, y_start
-
-        if ctrl.ok:
-            self.stats['ok'] += 1
-            self.fail_streak = 0
-            self.stopped = False
-            # 지수이동평균으로 프레임 간 튀는 명령을 완화한다
-            target = ctrl.servo
-            if self.invert_servo:
-                target = 2 * cfg.SERVO_CENTER - target
-            smoothed = self.servo_cmd + self.alpha * (target - self.servo_cmd)
-            self.apply_servo(smoothed)
-            self.apply_motor(self.speed)
-        else:
-            self.stats['fail'] += 1
-            self.fail_streak += 1
-            if self.fail_streak >= self.max_fail:
-                # 차선을 계속 못 찾으면 직전 조향을 유지한 채 세운다.
-                # 모르는 상태로 계속 달리는 것보다 안전하다.
-                if not self.stopped:
-                    self.stats['halt'] += 1
-                    print(f'  [정지] 연속 {self.fail_streak}프레임 검출 실패')
-                self.stopped = True
-                self.apply_motor(0)
-            else:
-                # 짧은 끊김은 직전 명령을 유지하고 넘어간다
-                self.apply_servo(self.servo_cmd)
-                self.apply_motor(self.speed)
-
-        return ctrl, warped, res, y_start
-
-
-# ==============================================================================
-# 공유 상태 (주행 스레드 <-> 웹 스레드)
-# ==============================================================================
-class Shared:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.jpeg = None            # 최신 HUD 프레임 (JPEG bytes)
-        self.raw = None             # 최신 원본 프레임 (캡처 저장용)
-        self.running = True
-        self.tel = {'mode': 'STOP', 'fps': 0.0, 'servo': cfg.SERVO_CENTER,
-                    'motor': 0, 'status': 'IDLE', 'halted': False, 'frames': 0}
-
-
-# ==============================================================================
-# 웹 대시보드
-# ==============================================================================
-PAGE = """
-<!doctype html><html><head><meta charset="utf-8">
-<title>Lane Tracer</title>
-<style>
- body{background:#111;color:#ddd;font-family:system-ui,sans-serif;margin:0;padding:16px}
- h1{font-size:18px;margin:0 0 12px}
- .wrap{display:flex;gap:16px;flex-wrap:wrap}
- img{border:1px solid #333;max-width:100%;height:auto}
- .panel{min-width:240px}
- table{border-collapse:collapse;font-size:14px;width:100%}
- td{padding:4px 8px;border-bottom:1px solid #262626}
- td:first-child{color:#888}
- button{font-size:15px;padding:10px 16px;margin:4px 4px 0 0;border:0;
-        border-radius:6px;color:#fff;cursor:pointer}
- .auto{background:#1a7f37}.manual{background:#1f6feb}.stop{background:#8b6b00}
- .estop{background:#b62324}.cap{background:#30363d}
- button.on{outline:3px solid #fff}
- #pad{margin-top:14px}
- #pad button{width:74px;height:56px;font-size:22px;background:#30363d}
- #pad.off{opacity:.35;pointer-events:none}
- .hint{color:#888;font-size:13px;margin-top:8px;line-height:1.5}
-</style></head><body>
-<h1>Lane Tracer — live debug</h1>
-<div class="wrap">
-  <img src="/video_feed" width="640">
-  <div class="panel">
-    <table>
-      <tr><td>MODE</td><td id="mode">-</td></tr>
-      <tr><td>FPS</td><td id="fps">-</td></tr>
-      <tr><td>SERVO</td><td id="servo">-</td></tr>
-      <tr><td>MOTOR</td><td id="motor">-</td></tr>
-      <tr><td>STATUS</td><td id="status">-</td></tr>
-      <tr><td>FRAMES</td><td id="frames">-</td></tr>
-    </table>
-    <div>
-      <button class="auto"   id="b_AUTO"   onclick="setMode('AUTO')">AUTO</button>
-      <button class="manual" id="b_MANUAL" onclick="setMode('MANUAL')">MANUAL</button>
-      <button class="stop"   id="b_STOP"   onclick="setMode('STOP')">STOP</button>
-    </div>
-    <div>
-      <button class="estop" onclick="cmd('estop')">EMERGENCY STOP</button>
-      <button class="cap"   onclick="cmd('capture')">CAPTURE</button>
-    </div>
-
-    <div id="pad" class="off">
-      <div style="text-align:center">
-        <button data-k="ArrowUp">&#9650;</button></div>
-      <div style="text-align:center">
-        <button data-k="ArrowLeft">&#9664;</button>
-        <button data-k="ArrowDown">&#9660;</button>
-        <button data-k="ArrowRight">&#9654;</button></div>
-      <div class="hint">MANUAL 모드에서만 동작합니다.<br>
-        키보드 방향키로도 조종할 수 있습니다 (누르는 동안만).</div>
-    </div>
-  </div>
-</div>
-<script>
-function post(body){return fetch('/api/control',{method:'POST',
-  headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
-function cmd(a){return post({action:a});}
-function setMode(m){return post({action:'set_mode',mode:m});}
-function keyDown(k){return post({action:'key_down',key:k});}
-function keyUp(k){return post({action:'key_up',key:k});}
-
-// 화면 버튼 — 누르는 동안 유지
-for(const b of document.querySelectorAll('#pad button')){
-  const k=b.dataset.k;
-  const down=e=>{e.preventDefault();keyDown(k);};
-  const up=e=>{e.preventDefault();keyUp(k);};
-  b.addEventListener('mousedown',down); b.addEventListener('mouseup',up);
-  b.addEventListener('mouseleave',up);
-  b.addEventListener('touchstart',down,{passive:false});
-  b.addEventListener('touchend',up,{passive:false});
-}
-
-// 키보드 방향키. 오토리피트로 중복 전송되지 않게 눌린 키를 추적한다.
-const held=new Set();
-const KEYS=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
-addEventListener('keydown',e=>{
-  if(!KEYS.includes(e.key)||held.has(e.key))return;
-  e.preventDefault(); held.add(e.key); keyDown(e.key);});
-addEventListener('keyup',e=>{
-  if(!KEYS.includes(e.key))return;
-  e.preventDefault(); held.delete(e.key); keyUp(e.key);});
-// 탭을 벗어나면 눌린 키를 모두 놓아준다 (키업을 놓치면 계속 달린다)
-addEventListener('blur',()=>{for(const k of held)keyUp(k); held.clear();});
-
-setInterval(async()=>{
-  const r=await fetch('/api/status'); const s=await r.json();
-  for(const k of ['mode','servo','motor','status','frames'])
-    document.getElementById(k).textContent=s[k];
-  document.getElementById('fps').textContent=s.fps.toFixed(1);
-  for(const m of ['AUTO','MANUAL','STOP'])
-    document.getElementById('b_'+m).classList.toggle('on',s.mode===m);
-  document.getElementById('pad').classList.toggle('off',s.mode!=='MANUAL');
-},300);
-</script></body></html>
-"""
-
-
-def make_app(shared, driver, save_dir):
-    try:
-        from flask import Flask, Response, jsonify, request
-    except ImportError as exc:
-        raise SystemExit(
-            'Flask 가 없어 웹 디버그 화면을 띄울 수 없습니다.\n'
-            '  설치: sudo apt install python3-flask   (또는 pip install flask)\n'
-            '  웹 없이 돌리려면: --no-web'
-        ) from exc
-
-    app = Flask(__name__)
-
-    @app.route('/')
-    def index():
-        return PAGE
-
-    def mjpeg():
-        while shared.running:
-            with shared.lock:
-                data = shared.jpeg
-            if data is not None:
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
-            time.sleep(0.033)          # 약 30fps
-
-    @app.route('/video_feed')
-    def video_feed():
-        return Response(mjpeg(),
-                        mimetype='multipart/x-mixed-replace; boundary=frame')
-
-    @app.route('/api/status')
-    def status():
-        with shared.lock:
-            return jsonify(dict(shared.tel))
-
-    @app.route('/api/control', methods=['POST'])
-    def api_control():
-        data = request.get_json(silent=True) or {}
-        action = data.get('action')
-
-        try:
-            if action == 'set_mode':
-                mode = str(data.get('mode', '')).upper()
-                if not driver.set_mode(mode):
-                    return jsonify({'ok': False, 'reason': f'unknown mode {mode!r}',
-                                    'mode': driver.mode}), 400
-                print(f'  [web] 모드 -> {mode}')
-
-            elif action == 'estop':
-                driver.set_mode('STOP')
-                driver.apply_servo(cfg.SERVO_CENTER)
-                print('  [web] EMERGENCY STOP')
-
-            elif action in ('key_down', 'key_up'):
-                # 수동 조종은 MANUAL 에서만. 자율주행 중 오조작을 막는다.
-                if driver.mode != 'MANUAL':
-                    return jsonify({'ok': False, 'reason': 'not MANUAL',
-                                    'mode': driver.mode})
-                key = data.get('key')
-                if action == 'key_down':
-                    if key == 'ArrowUp':
-                        driver.apply_motor(driver.manual_speed)
-                    elif key == 'ArrowDown':
-                        driver.apply_motor(-driver.manual_speed)
-                    elif key == 'ArrowLeft':
-                        driver.apply_servo(cfg.SERVO_MIN)
-                    elif key == 'ArrowRight':
-                        driver.apply_servo(cfg.SERVO_MAX)
-                else:
-                    # 키를 떼면 중립으로 — 놓친 key_up 때문에 계속 달리지 않게
-                    if key in ('ArrowUp', 'ArrowDown'):
-                        driver.apply_motor(0)
-                    elif key in ('ArrowLeft', 'ArrowRight'):
-                        driver.apply_servo(cfg.SERVO_CENTER)
-
-            elif action == 'capture':
-                with shared.lock:
-                    raw = None if shared.raw is None else shared.raw.copy()
-                if raw is not None:
-                    os.makedirs(save_dir, exist_ok=True)
-                    path = os.path.join(
-                        save_dir, f'cap_{time.strftime("%Y%m%d_%H%M%S")}.jpg')
-                    cv2.imwrite(path, raw)
-                    print(f'  [web] 캡처 저장: {path}')
-
-        except Exception as exc:                # 웹 요청 하나가 서버를 죽이면 안 된다
-            print(f'[web] 명령 처리 실패 ({action}): {exc}')
-            return jsonify({'ok': False, 'mode': driver.mode}), 500
-
-        return jsonify({'ok': True, 'mode': driver.mode})
-
-    return app
-
-
-# ==============================================================================
-# 루프
-# ==============================================================================
-def run_loop(hw, driver, shared, args):
-    t0 = time.time()
-    last_log = 0
-    frame_period = 1.0 / cfg.CAMERA_FPS
-
-    try:
-        while shared.running:
-            loop_start = time.time()
-
-            frame = hw.read()
-            if frame is None:
-                break
-            frame = cv2.resize(frame, (cfg.W, cfg.H))
-
-            ctrl, warped, res, y_start = driver.step(frame)
-
-            n = driver.stats['frames']
-            fps_now = n / max(time.time() - t0, 1e-6)
-
-            tel = {'mode': driver.mode, 'fps': fps_now,
-                   'servo': int(round(driver.servo_cmd)), 'motor': driver.motor_cmd,
-                   'status': 'OK' if ctrl.ok else 'NO LANE',
-                   'halted': driver.stopped, 'frames': n}
-
-            if args.web or args.window:
-                vis = overlay(warped, y_start, res, ctrl, tel)
-                if args.web:
-                    ok, buf = cv2.imencode('.jpg', vis,
-                                           [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
-                    if ok:
-                        with shared.lock:
-                            shared.jpeg = buf.tobytes()
-                            shared.raw = frame
-                            shared.tel = tel
-                if args.window:
-                    cv2.imshow('drive', vis)
-                    if (cv2.waitKey(1) & 0xFF) in (27, ord('q')):
-                        print('\n창에서 종료')
-                        break
-            else:
-                with shared.lock:
-                    shared.tel = tel
-
-            # 저장 형식을 captures/ 와 똑같이 맞춘다 (채널 스왑 후 640x480).
-            # 그래야 review.py / evaluate.py 가 동일하게 처리한다.
-            if args.record and n % args.record_every == 0:
-                cv2.imwrite(os.path.join(args.record, f'frame_{n:06d}.jpg'), frame)
-
-            if args.log_every and n - last_log >= args.log_every:
-                last_log = n
-                if ctrl.ok:
-                    print(f'  [{n:5d}] {fps_now:4.1f}fps  {driver.mode:4s} '
-                          f'servo={tel["servo"]:3d} delta={ctrl.delta_deg:+5.1f}deg'
-                          + ('  CLAMPED' if ctrl.clamped else ''))
-                else:
-                    print(f'  [{n:5d}] {fps_now:4.1f}fps  {driver.mode:4s} '
-                          f'검출 실패 ({ctrl.reason})')
-
-            # 카메라 프레임레이트에 맞춰 쉰다. 웹 스레드가 쓸 CPU 를 남긴다.
-            if not args.replay:
-                time.sleep(max(0.001, frame_period - (time.time() - loop_start)))
-
-    except KeyboardInterrupt:
-        print('\n사용자 종료')
-    except Exception as exc:
-        print(f'\n[에러] 주행 루프 예외: {exc}')
-    finally:
-        shared.running = False
-        try:
-            driver.apply_motor(0)
-            driver.apply_servo(cfg.SERVO_CENTER)
-        except Exception:
-            pass
-
-
-def print_summary(driver, hw, elapsed):
-    s = driver.stats
-    print()
-    print('=' * 52)
-    print(f"  프레임 {s['frames']}장  {s['frames'] / max(elapsed, 1e-6):.1f} fps")
-    if s['frames']:
-        print(f"  조향 산출 {s['ok']} ({100 * s['ok'] / s['frames']:.0f}%)  "
-              f"실패 {s['fail']} ({100 * s['fail'] / s['frames']:.0f}%)")
-    print(f"  연속 실패로 정지한 횟수: {s['halt']}")
-    print('=' * 52)
-
-    if isinstance(hw, ReplayHardware):
-        servos = [v for kind, v in hw.commands if kind == 'servo']
-        motors = [v for kind, v in hw.commands if kind == 'motor']
-        if servos:
-            arr = np.array(servos, float)
-            print(f'  servo 명령 {len(servos)}회: mean={arr.mean():.1f} '
-                  f'std={arr.std():.1f} 범위 {arr.min():.0f}~{arr.max():.0f}')
-            print(f'  motor 0 명령: {motors.count(0)}회 / {len(motors)}회')
+import driver as driverlib
+import hardware
+import loop
+import webui
 
 
 def main():
@@ -668,9 +87,14 @@ def main():
     ap.add_argument('--replay', metavar='DIR', help='하드웨어 대신 저장 이미지 사용')
     ap.add_argument('--replay-loop', action='store_true', help='replay 반복')
     ap.add_argument('--log-every', type=int, default=30, help='N프레임마다 상태 출력')
+    ap.add_argument('--profile', action='store_true',
+                    help='단계별 소요시간(ms) 출력 — FPS 저하 원인 추적용')
+    ap.add_argument('--pace-fps', type=float, default=cfg.CAMERA_FPS,
+                    help='루프 페이싱 목표 fps. 0 이면 sleep 없이 카메라 속도에 맡긴다')
     args = ap.parse_args()
 
-    # replay 는 기본적으로 웹을 안 띄운다 (로직 검증용). 필요하면 --port 로 켠다.
+    # 웹은 replay 여부와 무관하게 기본으로 뜬다 — replay 로도 대시보드를 그대로
+    # 확인할 수 있어야 하드웨어 없이 화면까지 검증된다. 끄려면 --no-web.
     args.web = not args.no_web
     speed = 0 if args.dry_run else args.speed
 
@@ -685,22 +109,23 @@ def main():
         print(f'[보정] vehicle_center_x_px = {metric.vehicle_center_x_px:.1f}')
 
     if args.replay:
-        hw = ReplayHardware(args.replay, loop=args.replay_loop)
+        hw = hardware.ReplayHardware(args.replay, loop=args.replay_loop)
         print(f'[replay] {len(hw.paths)}장 — 하드웨어 없이 루프 로직만 검증')
     else:
-        hw = Afb1Hardware()
+        hw = hardware.Afb1Hardware()
 
     pp = control.PurePursuit(metric=metric, lookahead_cm=args.lookahead,
                              servo_per_deg=args.steer_gain)
     # 웹이 있으면 STOP 으로 시작한다 — 실행하자마자 차가 나가지 않게.
     # 웹이 없으면 켤 방법이 없으므로 AUTO 로 시작한다.
     initial_mode = 'STOP' if args.web else 'AUTO'
-    driver = Driver(hw, pp,
-                    binarize.BACKENDS[args.binarize],
-                    detect.DETECTORS[args.detect],
-                    speed, args.max_fail, args.ema, args.invert_servo,
-                    manual_speed=args.manual_speed, mode=initial_mode)
-    shared = Shared()
+    driver = driverlib.Driver(hw, pp,
+                              binarize.BACKENDS[args.binarize],
+                              detect.DETECTORS[args.detect],
+                              speed, args.max_fail, args.ema, args.invert_servo,
+                              manual_speed=args.manual_speed, mode=initial_mode)
+    shared = loop.Shared()
+    prof = loop.Profiler(args.profile)
 
     if args.record:
         os.makedirs(args.record, exist_ok=True)
@@ -716,13 +141,14 @@ def main():
     t0 = time.time()
 
     if not args.web:
-        run_loop(hw, driver, shared, args)
+        loop.run_loop(hw, driver, shared, args, prof)
     else:
-        app = make_app(shared, driver,
-                       save_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                             'captures'))
-        worker = threading.Thread(target=run_loop, args=(hw, driver, shared, args),
-                                  daemon=True)
+        app = webui.make_app(shared, driver,
+                             save_dir=os.path.join(
+                                 os.path.dirname(os.path.abspath(__file__)),
+                                 'captures'))
+        worker = threading.Thread(target=loop.run_loop,
+                                  args=(hw, driver, shared, args, prof), daemon=True)
         worker.start()
 
         print()
@@ -744,7 +170,7 @@ def main():
     if args.window:
         cv2.destroyAllWindows()
     hw.shutdown()
-    print_summary(driver, hw, time.time() - t0)
+    loop.print_summary(driver, hw, time.time() - t0)
 
 
 if __name__ == '__main__':

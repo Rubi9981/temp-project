@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AFB Web Control</title>
+
+<style>
+
+body{
+margin:0;
+background:black;
+font-family:Arial;
+overflow:hidden;
+color:white;
+}
+
+#video{
+width:100vw;
+height:100vh;
+object-fit:cover;
+}
+
+#panel{
+position:absolute;
+top:20px;
+left:20px;
+background:rgba(0,0,0,0.55);
+padding:20px;
+border-radius:10px;
+line-height:1.6;
+}
+
+#title{
+font-size:20px;
+font-weight:bold;
+margin-bottom:10px;
+}
+
+.key{
+display:inline-block;
+padding:4px 8px;
+border:1px solid white;
+border-radius:4px;
+margin:2px;
+}
+
+#status{
+margin-top:10px;
+font-size:14px;
+color:#9cff9c;
+}
+
+</style>
+</head>
+
+
+<body tabindex="0">
+
+<img id="video" src="/video_feed">
+
+<div id="panel">
+
+<div id="title">AFB 차량 원격 제어</div>
+
+<b>조작 방법</b><br><br>
+
+<span class="key">↑</span> 전진<br>
+<span class="key">↓</span> 후진<br>
+<span class="key">←</span> 좌 조향<br>
+<span class="key">→</span> 우 조향<br>
+<span class="key">Space</span> 캡쳐 저장<br><br>
+
+※ 키를 누르는 동안만 동작합니다.<br>
+※ 키를 떼면 차량이 정지합니다.
+
+<div id="status">READY</div>
+
+</div>
+
+
+<script>
+
+let keys = {}
+const status = document.getElementById("status")
+
+document.body.focus()
+
+document.addEventListener("keydown", function(e){
+
+if(keys[e.code]) return
+keys[e.code] = true
+
+if(e.code === "ArrowUp"){
+send("ArrowUp")
+status.innerText="FORWARD"
+}
+
+if(e.code === "ArrowDown"){
+send("ArrowDown")
+status.innerText="BACKWARD"
+}
+
+if(e.code === "ArrowLeft"){
+send("ArrowLeft")
+status.innerText="LEFT"
+}
+
+if(e.code === "ArrowRight"){
+send("ArrowRight")
+status.innerText="RIGHT"
+}
+
+if(e.code === "Space"){
+capture()
+status.innerText="CAPTURE"
+}
+
+})
+
+
+document.addEventListener("keyup", function(e){
+
+keys[e.code] = false
+
+// 모터 stop
+if(
+e.code === "ArrowUp" ||
+e.code === "ArrowDown"
+){
+send("stop")
+status.innerText="STOP"
+}
+
+// 서보 센터 복귀
+if(
+e.code === "ArrowLeft" ||
+e.code === "ArrowRight"
+){
+send("servo_center")
+}
+
+})
+
+
+function send(cmd){
+
+fetch("/key",{
+method:"POST",
+headers:{
+"Content-Type":"application/x-www-form-urlencoded"
+},
+body:"key="+cmd
+})
+
+}
+
+function capture(){
+fetch("/capture",{method:"POST"})
+}
+
+</script>
+
+</body>
+</html>

@@ -16,15 +16,15 @@ import config as cfg
 
 @dataclass
 class LaneResult:
-    status: str                  # 'ok' | 'single' | 'fail'
-    left_x: float = None
-    right_x: float = None
-    center_x: float = None
+    status: str                 # 'ok' | 'single' | 'fail'
+    left_x: float = None        # 왼쪽 차선 위치
+    right_x: float = None       # 오른쪽 차선 위치
+    center_x: float = None      # 차선 중심 위치
     eval_y: float = None         # 위 x값들을 잰 ROI 내 y
     width: float = None          # right_x - left_x (status='ok'일 때만 의미 있음)
-    fit_left: np.ndarray = None   # 2차 다항식 계수 x=f(y) (sliding_window 전용)
-    fit_right: np.ndarray = None
-    fit_center: np.ndarray = None  # 주행 중심선. np.polyval(fit_center, y) -> x
+    fit_left: np.ndarray = None     # 왼쪽 차선의 2차 다항식 계수 x=f(y) (sliding_window 전용)
+    fit_right: np.ndarray = None    # 오른쪽 차선의 2차 다항식
+    fit_center: np.ndarray = None   # 주행에 사용할 중심선. (Pure Pursuit에서 사용) np.polyval(fit_center, y) -> x
     viz: dict = field(default_factory=dict)   # 시각화용 부산물
 
 

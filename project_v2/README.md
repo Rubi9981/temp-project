@@ -1,93 +1,142 @@
 # project_v2 — 차선 검출 파이프라인 재구성 및 평가 하네스
 
-기존 `project/` 는 그대로 두고, 이진화·검출 방식을 **교체 가능한 백엔드**로 분리해
-개선 효과를 숫자로 비교할 수 있게 만든 것.
+카메라로 바닥의 차선을 찾아 그 가운데를 따라 달리는 소형 자율주행 차량(라즈베리파이 +
+afb1 보드)의 소프트웨어다.
 
-## 구성
+기존 `project/` 는 그대로 두고, 이진화·검출 방식을 **교체 가능한 백엔드**로 분리해
+개선 효과를 숫자로 비교할 수 있게 만든 것이다. "이 방법이 더 낫다"는 주장을 감이
+아니라 측정으로 뒷받침하는 게 이 폴더의 목적이다.
+
+---
+
+## 처음 오셨다면
+
+### 1. 무슨 일이 일어나는가
+
+카메라 사진 한 장이 서보 각도 하나로 바뀌기까지의 과정이다.
+
+```
+카메라 프레임 (640×480)
+      │
+      ▼
+ [1] BEV 변환       bev.py         비스듬히 본 바닥을 위에서 내려다본 것처럼 편다
+      │
+      ▼
+ [2] ROI 자르기     bev.py         화면 아래쪽 45%만 본다 (차에 가까운 노면)
+      │
+      ▼
+ [3] 이진화         binarize.py    차선일 것 같은 픽셀만 흰색, 나머지는 검정
+      │
+      ▼
+ [4] 차선 검출      detect.py      흰 픽셀 → 좌/우 차선 곡선 → 그 사이 중심선
+      │
+      ▼
+ [5] 조향 계산      control.py     중심선 위의 목표점 → 서보 각도
+      │
+      ▼
+ 서보 / 모터        hardware.py
+```
+
+이 다섯 단계 중 **[3]과 [4]는 방식을 바꿔 끼울 수 있다.** 이진화 3종, 검출 2종이
+있어 총 6가지 조합이 되고, 어느 조합이 나은지를 `evaluate.py` 로 잰다.
+
+### 2. 용어
+
+| 용어 | 뜻 |
+|---|---|
+| **BEV** (Bird's Eye View) | 위에서 내려다본 시점. 비스듬히 찍힌 바닥을 직사각형으로 펴면 차선이 평행해져 다루기 쉬워진다 |
+| **이진화** | 사진을 흑백 두 값으로만 바꾸는 것. "여기가 차선이다"를 흰색으로 표시하는 단계 |
+| **ROI** (Region of Interest) | 실제로 들여다볼 영역. 화면 전체가 아니라 차 앞쪽 노면만 본다 |
+| **백엔드** | 같은 일을 하는 서로 다른 구현. 이름으로 골라 끼운다 (`--binarize tophat`) |
+| **baseline** | 비교 기준이 되는 기존 방식. 개선 주장은 항상 이것과의 비교로만 한다 |
+| **슬라이딩 윈도우** | 차선을 아래에서 위로 창을 옮겨가며 따라 올라가는 추적 기법 |
+| **Pure Pursuit** | 앞쪽 목표점 하나를 정하고 그 점을 원호로 통과하도록 핸들을 꺾는 고전 제어 기법 |
+| **GT / 정답 라벨** | 사람이 직접 찍어준 "진짜 차선 위치". 이게 있어야 오차를 잴 수 있다 |
+| **프록시 지표** | 정답이 없을 때 대신 쓰는 간접 지표. 편리하지만 속을 수 있다 (아래 3번 항목) |
+
+### 3. 실행해 보기
+
+**모든 명령은 `project_v2/` 폴더 안에서 실행한다.** 모듈들이 같은 폴더의 형제
+파일을 직접 import 하기 때문에 다른 위치에서 돌리면 import 에러가 난다.
+
+```bash
+cd project_v2
+python3 evaluate.py --compare-all       # 1) 6가지 조합을 숫자로 비교
+python3 review.py --sort worst          # 2) 실패한 프레임부터 눈으로 확인
+python3 drive.py --replay ../project/captures --no-web   # 3) 주행 로직 통째로 돌려보기
+```
+
+3번은 하드웨어 없이 저장된 사진 74장을 카메라 대신 먹여 주행 루프 전체를
+돌리는 것이다. **개발 PC에서 안전하게 실행된다.**
+
+### 4. 준비물
+
+- Python 3 (개발 확인 환경: 3.14), `opencv-python`, `numpy`
+- `flask` — 웹 대시보드용. **없어도 `--no-web` 으로 돌아간다**
+- 실차 주행에는 라즈베리파이 + `afb1` 모듈 (Pi 에만 설치돼 있다)
+
+데이터는 `../project/captures/` (원본 74장), `../project/captures_bev/` (기존 BEV
+산출물 68장)에 있다.
+
+---
+
+## 파일 구성
+
+### 인지 파이프라인
 
 | 파일 | 역할 |
 |---|---|
-| `config.py` | 모든 파라미터의 단일 소스 (`SRC_POINTS` 포함). 기존엔 6개 파일에 복붙돼 있었다 |
-| `bev.py` | BEV 변환 + 폭-기울기 품질 지표 |
-| `binarize.py` | 이진화 백엔드 3종 — `hsv`(baseline) / `adaptive` / `tophat` |
-| `detect.py` | 검출 백엔드 2종 — `centroid`(baseline) / `sliding` |
-| `evaluate.py` | 데이터셋 전체 A/B 벤치마크 |
-| `tune_src.py` | 폭-기울기 지표로 `SRC_POINTS` 최적화 (**아래 3번 항목 반드시 읽을 것**) |
-| `label_gt.py` | 정답 라벨 클릭 도구 (선택) |
-| `review.py` | 프레임별 시각 검토 뷰어 |
+| `config.py` | 파라미터 파일 |
+| `bev.py` | BEV 변환 |
+| `binarize.py` | 차선 후보 검출 3종 — `hsv`(baseline) / `adaptive` / `tophat` |
+| `detect.py` | 차선 검출 확정 2종 — `centroid`(baseline) / `sliding` |
 | `control.py` | Pure Pursuit 조향 제어기 |
+
+### 실시간 주행 (라즈베리파이)
+
+`drive.py` 를 실행하면 나머지 다섯이 조립되어 돌아간다.
+
+| 파일 | 역할 |
+|---|---|
+| `drive.py` | **진입점.** 명령행 인자 파싱과 조립만 한다 |
+| `hardware.py` | 하드웨어 추상화 — `Afb1Hardware`(실차) / `ReplayHardware`(저장 이미지) |
+| `driver.py` | 주행 상태 기계 — 한 프레임 처리 + AUTO/MANUAL/STOP |
+| `loop.py` | 주행 루프, 스레드 간 공유 상태, 단계별 소요시간 프로파일러 |
+| `hud.py` | 화면 위에 검출/제어 상태 그리기 |
+| `webui.py` | Flask 웹 디버그 대시보드 (HTML 인라인) |
+
+```
+drive.py ──> hardware  (카메라/서보/모터, 또는 replay)
+        ├──> driver    (한 프레임 → 조향/구동 명령)
+        ├──> loop      ──> hud   (화면 그리기)
+        └──> webui     (브라우저 대시보드)
+```
+
+### 개발 도구 (PC에서 실행)
+
+| 파일 | 역할 |
+|---|---|
+| `evaluate.py` | 데이터셋 전체 A/B 벤치마크 |
+| `review.py` | 프레임별 시각 검토 뷰어 |
+| `label_gt.py` | 정답 라벨 클릭 도구 (선택) |
 | `calibrate_metric.py` | BEV 픽셀 <-> cm 환산 캘리브레이션 |
-| `test_control.py` | Pure Pursuit 기하 단위 테스트 (40개) |
-| `drive.py` | 라즈베리파이 실시간 주행 루프 (afb1) |
+| `tune_src.py` | 폭-기울기 지표로 `SRC_POINTS` 최적화 (**아래 2번 항목 반드시 읽을 것**) |
+| `test_control.py` | Pure Pursuit 기하 단위 테스트 (40개). `python3 test_control.py` |
 
 ## 사용법
 
 ```bash
-python evaluate.py --compare-all --src captures_bev   # 전체 조합 비교
-python evaluate.py --binarize tophat --detect sliding  # 단일 조합 상세
-python review.py                                       # 전체 순회 시각 검토
-python review.py --sort worst                          # 오차 큰 순 — 실패 사례부터
-python label_gt.py                                     # 정답 라벨링
-python tune_src.py                                     # BEV 재튜닝 (dry-run)
+python3 evaluate.py --compare-all --src captures_bev   # 전체 조합 비교
+python3 evaluate.py --binarize tophat --detect sliding  # 단일 조합 상세
+python3 review.py                                       # 전체 순회 시각 검토
+python3 review.py --sort worst                          # 오차 큰 순 — 실패 사례부터
+python3 label_gt.py                                     # 정답 라벨링
+python3 tune_src.py                                     # BEV 재튜닝 (dry-run)
 ```
 
-`--src captures` 는 원본에서 매번 warp 하므로 `SRC_POINTS` 변경이 즉시 반영된다.
+`--src captures` 는 원본에서 매번 warp 하므로 `SRC_POINTS` 변경이 즉시 반영된다(기본값).
 `--src captures_bev` 는 기존 BEV 산출물(68장)을 그대로 쓴다 — baseline 재현용.
 
----
-
-## 측정 결과 (`captures_bev`, 68장)
-
-```
-binarize  detect         정상     단측     실패     과검출    폭std  err std
-hsv       centroid      71%    18%    12%     26%   129.1     89.0   <- baseline
-hsv       sliding       62%    24%    15%     26%    72.3     55.7
-adaptive  centroid      91%     0%     9%     85%   105.2     36.8
-adaptive  sliding       81%     9%    10%     85%    30.1     55.2
-tophat    centroid      91%     4%     4%     37%    61.8     38.2
-tophat    sliding       81%    10%     9%     37%    45.8     54.7
-```
-
-확실하게 말할 수 있는 것:
-
-- **`tophat` 이 이진화로서 baseline보다 명확히 낫다.** 완전 실패 12% → 4%,
-  단측(좌우 붕괴) 18% → 4%. 시각 확인 결과 baseline HSV는 정상 프레임에서도
-  차선을 5조각으로 쪼개는 반면 tophat은 온전한 띠로 잡는다.
-- **조향 포화가 사라졌다.** baseline은 `clip(±200)` 포화가 4장(6%) — 조향이
-  풀락으로 나가는 프레임이다. baseline 외 모든 조합에서 0%.
-- **`sliding` 이 좌우 붕괴를 실제로 복구한다.** 반사광 프레임
-  `bev_frame_20260803_162326` 에서 baseline은 `center=515.9`(error −196, 풀락)로
-  붕괴하지만 sliding은 `center=303.6` 으로 회복한다.
-- **`adaptive` 는 수치가 좋아 보여도 쓰지 말 것.** 과검출 85%. 시각 확인 결과
-  차선을 채우는 게 아니라 **차선의 윤곽선**을 뽑고 있다. 폭std가 낮은 것도
-  윤곽 간 거리가 반복적이기 때문이지 차선을 잘 잡아서가 아니다.
-
-확정할 수 없는 것:
-
-- **`tophat+centroid` 와 `tophat+sliding` 중 무엇이 나은지는 지금 데이터로
-  결정 불가.** err std는 centroid(38.2)가, 폭std는 sliding(45.8)이 낫다.
-  정답 라벨이 없어 어느 쪽이 진짜 차선에 가까운지 판정할 수단이 없다.
-  → `label_gt.py` 를 돌리면 `evaluate.py --gt` 가 실제 MAE/p95를 낸다. 5분이면 된다.
-
-## 중심선 (`fit_center`)
-
-`sliding` 검출기는 좌/우 차선을 2차 다항식 `x = f(y)` 로 피팅한다. `np.polyval` 은
-계수에 선형이므로 **두 계수를 평균내면 그대로 중심선**이 된다.
-
-```python
-res = detect.sliding_window(mask)
-x = np.polyval(res.fit_center, y)     # ROI 내 임의의 y 에서 주행 목표 x
-```
-
-한쪽 차선만 잡히면 상수항만 `LANE_WIDTH_PX/2` 만큼 밀어 평행 이동시킨다.
-BEV에서 차선이 수직에 가까울 때만 정확한 근사이며, 곡률이 큰 구간에서는
-법선 방향 간격이 이보다 좁아진다.
-
-`centroid` 는 점 하나만 내므로 `fit_center` 가 `None` 이다 — 중심선을 보려면
-반드시 `--detect sliding` 이어야 한다.
-
-look-ahead 거리를 y로 지정해 목표점을 뽑을 수 있으므로 Pure Pursuit 같은
-기하 제어기에 바로 물릴 수 있다.
 
 ## Pure Pursuit (`control.py`)
 
@@ -127,25 +176,12 @@ x와 y의 cm 환산 계수가 다른 이유는 dst 사각형을 640×480 전체�
 만들었기 때문이다 (실세계 영역의 가로:세로 비와 무관하게 4:3 으로 강제).
 현재 비등방 비율은 약 1.9 다.
 
-## 실시간 주행 (`drive.py`)
-
-라즈베리파이에서만 돈다. afb1 API 는 `raspi/` 예제에서 확인된 것만 쓴다:
-`gpio.init/stby/servo/motor/stop_all`, `camera.init/get_image/release_camera`,
-`flask.imshow`.
-
-```bash
-python3 drive.py --replay ../project/captures --no-web   # 0) 하드웨어 없이 로직 확인
-python3 drive.py --dry-run                               # 1) 모터 끈 채 조향만 확인
-python3 drive.py --speed 40 --record run1                # 2) 실제 주행 + 녹화
-python3 review.py --src run1 --sort worst                # 3) 오프라인 정밀 검토
-```
-
-**기본은 모터 정지다.** `--speed` 를 명시해야 움직인다.
-서보가 반대로 돌면 `--invert-servo`.
 
 ### 웹 디버그 대시보드
 
 주행하면 **자체 Flask 서버가 함께 뜬다** (기본 5000번, `--port` 로 변경).
+`--replay` 로 돌릴 때도 똑같이 뜨므로, **하드웨어 없이 대시보드까지 확인할 수 있다.**
+끄려면 `--no-web`.
 
 ```
 http://<Pi주소>:5000
@@ -156,12 +192,12 @@ http://<Pi주소>:5000
 
 | 경로 | 내용 |
 |---|---|
-| `/` | 대시보드 (영상 + 상태표 + 버튼). HTML 인라인이라 templates/ 불필요 |
+| `/` | 대시보드 (영상 + 상태표 + 버튼). HTML이 `webui.py` 안에 인라인이라 templates/ 불필요 |
 | `/video_feed` | MJPEG 스트림 |
 | `/api/status` | JSON 텔레메트리 (mode/fps/servo/motor/status/frames) |
 | `/api/control` | POST — 아래 참조 |
 
-화면 위 HUD: ROI 박스, 좌우 차선 다항식, **노란 중심선**, **자홍색 목표점**,
+화면 위 HUD(`hud.py`): ROI 박스, 좌우 차선 다항식, **노란 중심선**, **자홍색 목표점**,
 MODE/FPS/SERVO/MOTOR, 검출 상태, 하단 **조향 게이지 바**.
 
 ### 주행 모드 — 웹에서 전환
@@ -195,8 +231,9 @@ MANUAL 조작은 `ArrowUp`(전진) / `ArrowDown`(후진) / `ArrowLeft` / `ArrowR
   `--no-web` 일 때만 AUTO 로 시작한다 (켤 방법이 없으므로)
 - 모드 전환은 **어느 방향이든 일단 모터를 세우고** 들어간다
 - EMERGENCY STOP 은 모터 정지 + 서보 중립(90) 복귀
-- 하드웨어 출력은 주행 스레드와 웹 스레드가 공유하므로 `Driver.hw_lock` 으로
-  직렬화한다. 두 스레드가 동시에 `servo()`/`motor()` 를 호출하지 않는다
+- 하드웨어 출력은 주행 스레드와 웹 스레드가 공유하므로 `driver.py` 의
+  `Driver.hw_lock` 으로 직렬화한다. 두 스레드가 동시에 `servo()`/`motor()` 를
+  호출하지 않는다
 
 `--window` 를 주면 `cv2.imshow` 창도 함께 띄운다 (모니터/VNC 가 있을 때).
 `--no-web` 이면 웹 없이 터미널 로그만.
@@ -218,8 +255,8 @@ MANUAL 조작은 `ArrowUp`(전진) / `ArrowDown`(후진) / `ArrowLeft` / `ArrowR
 거친 뒤 `cv2.imwrite` 한다. 따라서 `captures/` 를 `cv2.imread` 로 읽은 배열은
 **`get_image()` 원본이 아니라 채널이 한 번 뒤바뀐 것**이다. 오프라인에서
 튜닝한 이진화가 같은 색을 보려면 실시간 루프도 똑같이 스왑해야 하며,
-`Afb1Hardware.read()` 가 그렇게 한다. 이걸 빠뜨리면 특히 `hsv` 백엔드가
-전혀 다른 색을 보게 된다.
+`hardware.py` 의 `Afb1Hardware.read()` 가 그렇게 한다. 이걸 빠뜨리면 특히
+`hsv` 백엔드가 전혀 다른 색을 보게 된다.
 
 ### 검출 실패 처리
 
@@ -233,6 +270,30 @@ MANUAL 조작은 `ArrowUp`(전진) / `ArrowDown`(후진) / `ArrowLeft` / `ArrowR
 ```
 
 서보 명령에는 지수이동평균(`SERVO_EMA_ALPHA=0.5`)을 건다. 끄려면 `--ema 1.0`.
+
+### FPS 진단
+
+```bash
+python3 drive.py --dry-run --profile --log-every 30
+```
+
+단계별 소요시간(평균/최대 ms)이 찍힌다. 읽는 법:
+
+| 증상 | 해석 | 조치 |
+|---|---|---|
+| `read` 가 30ms 근처 | `get_image()` 가 블로킹하며 페이싱 중 | `--pace-fps 0` (우리 sleep 제거) |
+| `step` 최대값이 평균의 3배 이상 | 마스크 밀도에 따른 검출 부하 변동 | `--binarize tophat`, ROI 축소 |
+| `encode` 가 큼 | JPEG 인코딩 | `--jpeg-quality 50` |
+| `record` 가 큼 | SD카드 쓰기 지연 | `--record-every` 늘리기 |
+| 전체가 서서히 증가 | 발열 스로틀링 | `vcgencmd measure_temp` |
+
+**FPS 는 순간값과 누적 평균을 둘 다 표시한다.** 누적 평균은 프레임이 쌓일수록
+둔해져서 주행 중 저하를 못 잡아내므로, 최근 30프레임 간격으로 잰 순간값을
+같이 낸다.
+
+**30 -> 15 처럼 정확히 반토막 나면** 카메라 프레임 경계를 놓친 것이다.
+처리시간이 33.3ms 를 살짝 넘으면 다음 프레임을 통째로 기다리게 되어 중간값
+없이 30 아니면 15 가 된다. `--pace-fps 0` 를 먼저 시도할 것.
 
 ### 성능
 
@@ -269,6 +330,9 @@ Pi 는 5~10배 느리다고 보면 15~25ms 로 30fps 는 무리 없을 전망이
 ---
 
 ## 작업 중 확인된 세 가지
+
+여기부터는 **"해봤더니 이랬다"는 기록**이다. 같은 실수를 반복하지 않기 위한 것이라
+숫자를 그대로 남겨 뒀다.
 
 ### 1. baseline 수치 정정
 
