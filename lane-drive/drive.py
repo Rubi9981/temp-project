@@ -84,13 +84,16 @@ def main():
     ap.add_argument('--yolo', action='store_true',
                     help='YOLO 객체 탐지를 켠다. 결과는 화면 상태표에만 표시되고 '
                          '주행 제어에는 관여하지 않는다')
-    ap.add_argument('--yolo-model', default=cfg.YOLO_MODEL_PATH, metavar='PT',
-                    help='가중치 파일 경로')
-    ap.add_argument('--yolo-conf', type=float, default=cfg.YOLO_CONF,
+    # 모델 관련 이름은 watch.py 와 맞춘다 (--model / --conf / --imgsz).
+    # 주기만 --yolo-every 로 남긴다 — 이 파일의 --detect 는 차선 검출기를
+    # 고르는 옵션이라 --detect-every 로 쓰면 헷갈린다.
+    ap.add_argument('--model', default=cfg.YOLO_MODEL_PATH, metavar='PATH',
+                    help='가중치 경로. .pt 파일 또는 NCNN 내보내기 폴더')
+    ap.add_argument('--conf', type=float, default=cfg.YOLO_CONF,
                     help='신뢰도 임계값')
-    ap.add_argument('--yolo-imgsz', type=int, default=cfg.YOLO_IMGSZ,
-                    help='추론 입력 크기. 낮추면 빠르지만 탐지를 잃는다 '
-                         '(448=90%%, 320=73%%)')
+    ap.add_argument('--imgsz', type=int, default=cfg.YOLO_IMGSZ,
+                    help='추론 입력 크기. NCNN 모델은 내보낼 때 고정되므로 '
+                         '여기서 바꿔도 통하지 않는다')
     ap.add_argument('--yolo-every', type=int, default=cfg.YOLO_EVERY,
                     help='N프레임마다 추론. 동기 실행이라 그 프레임에서 루프가 멈춘다')
     # 데이터
@@ -103,7 +106,7 @@ def main():
     ap.add_argument('--profile', action='store_true',
                     help='단계별 소요시간(ms) 출력 — FPS 저하 원인 추적용')
     ap.add_argument('--pace-fps', type=float, default=cfg.CAMERA_FPS,
-                    help='루프 페이싱 목표 fps. 0 이면 sleep 없이 카메라 속도에 맡긴다')
+                    help='목표 fps. 0 이면 sleep 없이 최대 속도')
     args = ap.parse_args()
 
     # 웹은 replay 여부와 무관하게 기본으로 뜬다 — replay 로도 대시보드를 그대로
@@ -128,9 +131,9 @@ def main():
         # import 도 여기서만 한다 — ultralytics 가 없는 Pi 에서도 --yolo 를
         # 안 주면 주행은 그대로 돌아야 한다
         import yolo
-        det = yolo.Detector(args.yolo_model, args.yolo_conf, args.yolo_imgsz)
-        print(f'[yolo] {os.path.basename(args.yolo_model)} '
-              f'imgsz={args.yolo_imgsz} conf={args.yolo_conf} '
+        det = yolo.Detector(args.model, args.conf, args.imgsz)
+        print(f'[yolo] {os.path.basename(args.model)} '
+              f'imgsz={args.imgsz} conf={args.conf} '
               f'매 {args.yolo_every}프레임  클래스 {len(det.names)}종')
 
     if args.replay:

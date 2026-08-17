@@ -114,6 +114,29 @@ drive.py ──> hardware  (카메라/서보/모터, 또는 replay)
         └──> webui     (브라우저 대시보드)
 ```
 
+### 다른 진입점 (Pi에서 실행)
+
+`hardware.py` 와 `yolo.py` 를 같이 쓰지만 목적이 달라 따로 둔 실행 파일들이다.
+셋 다 웹 화면을 띄우며 포트가 겹치지 않는다.
+
+| 파일 | 하는 일 | 포트 |
+|---|---|---|
+| `drive.py` | 차선 자율주행 (AUTO/MANUAL/STOP). 탐지는 숫자로만 | 5000 |
+| `collect.py` | 수동 주행 + N프레임마다 프레임 저장 (학습 데이터 수집) | 5001 |
+| `watch.py` | 수동 주행 + 카메라 원본 화면에 탐지 박스 표시 | 5002 |
+
+`collect.py` 와 `watch.py` 는 **차선 인지를 전혀 돌리지 않는다** — BEV·이진화·
+슬라이딩 윈도우·Pure Pursuit 이 빠져서 그만큼 가볍다.
+
+```bash
+python3 watch.py                                 # 매 프레임 탐지
+python3 watch.py --detect-every 3 --imgsz 448    # 영상을 부드럽게
+```
+
+`watch.py` 의 탐지도 루프 안에서 동기로 돈다. **느린 영상으로 차를 모는 것은
+그 자체로 위험하므로**, 이동 위주일 때는 화면의 DETECT 버튼으로 탐지를 끄거나
+`--detect-every` 를 늘린다.
+
 ### 개발 도구 (PC에서 실행)
 
 | 파일 | 역할 |
@@ -317,7 +340,7 @@ car_white / human / left / red / right / right_sign`)로 프레임 안의 객체
 
 ```bash
 python3 drive.py --yolo                          # 매 15프레임마다 추론
-python3 drive.py --yolo --yolo-every 30 --yolo-imgsz 448
+python3 drive.py --yolo --yolo-every 30 --model ../object_detection/best_v3.pt
 ```
 
 **기본은 꺼짐이다.** `--yolo` 를 주지 않으면 `ultralytics` 를 import 조차 하지
@@ -329,7 +352,18 @@ python3 drive.py --yolo --yolo-every 30 --yolo-imgsz 448
 0.781(conf>0.7 이 74%)이지만, 채널을 뒤집으면 0.516(28%)으로 떨어진다.
 `raspi/L_7_YOLO.py` 는 스왑을 안 하는데 그건 다른 모델 기준이라 따라가면 안 된다.
 
-`--yolo-imgsz` 를 낮추면 빨라지는 대신 **탐지를 잃는다** (150장, 640 결과 기준):
+**런타임을 NCNN 으로 바꾸면 정확도 손실 없이 빨라진다** (맥 CPU, obstacles 150장):
+
+| 런타임 | imgsz | 평균 | 배속 | 검출 수 |
+|---|---|---|---|---|
+| PyTorch `.pt` | 640 | 33.5 ms | 1.00x | 117 |
+| **NCNN (현재 기본값)** | 640 | **15.3 ms** | **2.19x** | **119** |
+| ONNX Runtime | 640 | 38.3 ms | 0.86x | 117 |
+
+ONNX 는 오히려 느렸다. 만드는 법은 `yolo export model=best_v3.pt format=ncnn imgsz=640`
+이며, **NCNN 모델은 내보낼 때 imgsz 가 고정되어 `--imgsz` 로 못 바꾼다.**
+
+`imgsz` 를 낮추면 더 빨라지는 대신 **탐지를 잃는다** (150장, 640 결과 기준):
 
 | imgsz | 검출 수 | 640과 결과가 같은 프레임 | Mac(MPS) |
 |---|---|---|---|
@@ -343,7 +377,7 @@ python3 drive.py --yolo --yolo-every 30 --yolo-imgsz 448
 **주의: 추론은 주행 루프 안에서 동기로 돈다.** 추론하는 프레임에서는 그 시간만큼
 서보 갱신이 늦어진다. 첫 추론의 초기화 비용(Mac 482ms)은 시작 시 미리 한 번
 돌려 없앴지만, 매 추론 자체의 비용은 남는다. Pi 에서 `--profile` 로 `yolo`
-단계를 재보고 `--yolo-every` / `--yolo-imgsz` 를 정할 것. 지연이 문제가 되면
+단계를 재보고 `--yolo-every` / 내보내기 `imgsz` 를 정할 것. 지연이 문제가 되면
 별도 스레드로 옮기면 되고, 그때 바뀌는 곳은 `loop.py` 한 곳뿐이다.
 
 `.pt` 는 `.gitignore` 에 걸려 추적되지 않으므로 **Pi 로 따로 복사해야 한다.**
