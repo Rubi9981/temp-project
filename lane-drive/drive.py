@@ -80,6 +80,19 @@ def main():
     ap.add_argument('--center-offset', type=float, default=0.0,
                     help='BEV상 차량 중심선 보정(px). + 면 좌선회를 더 한다 '
                          '= 차가 오른쪽으로 쏠릴 때 쓴다')
+    # 객체 탐지 (기본 꺼짐 — 주지 않으면 ultralytics 를 import 조차 하지 않는다)
+    ap.add_argument('--yolo', action='store_true',
+                    help='YOLO 객체 탐지를 켠다. 결과는 화면 상태표에만 표시되고 '
+                         '주행 제어에는 관여하지 않는다')
+    ap.add_argument('--yolo-model', default=cfg.YOLO_MODEL_PATH, metavar='PT',
+                    help='가중치 파일 경로')
+    ap.add_argument('--yolo-conf', type=float, default=cfg.YOLO_CONF,
+                    help='신뢰도 임계값')
+    ap.add_argument('--yolo-imgsz', type=int, default=cfg.YOLO_IMGSZ,
+                    help='추론 입력 크기. 낮추면 빠르지만 탐지를 잃는다 '
+                         '(448=90%%, 320=73%%)')
+    ap.add_argument('--yolo-every', type=int, default=cfg.YOLO_EVERY,
+                    help='N프레임마다 추론. 동기 실행이라 그 프레임에서 루프가 멈춘다')
     # 데이터
     ap.add_argument('--record', metavar='DIR',
                     help='주행 프레임을 저장. 나중에 review.py 로 되돌려 본다')
@@ -107,6 +120,18 @@ def main():
         metric = dataclasses.replace(
             metric, vehicle_center_x_px=metric.vehicle_center_x_px + args.center_offset)
         print(f'[보정] vehicle_center_x_px = {metric.vehicle_center_x_px:.1f}')
+
+    # 하드웨어보다 먼저 만든다. 모델 파일이 없거나 ultralytics 가 없으면
+    # gpio/카메라를 건드리기 전에 끝내야 정리 없이 죽는 일이 없다.
+    det = None
+    if args.yolo:
+        # import 도 여기서만 한다 — ultralytics 가 없는 Pi 에서도 --yolo 를
+        # 안 주면 주행은 그대로 돌아야 한다
+        import yolo
+        det = yolo.Detector(args.yolo_model, args.yolo_conf, args.yolo_imgsz)
+        print(f'[yolo] {os.path.basename(args.yolo_model)} '
+              f'imgsz={args.yolo_imgsz} conf={args.yolo_conf} '
+              f'매 {args.yolo_every}프레임  클래스 {len(det.names)}종')
 
     if args.replay:
         hw = hardware.ReplayHardware(args.replay, loop=args.replay_loop)
@@ -141,14 +166,15 @@ def main():
     t0 = time.time()
 
     if not args.web:
-        loop.run_loop(hw, driver, shared, args, prof)
+        loop.run_loop(hw, driver, shared, args, prof, det)
     else:
         app = webui.make_app(shared, driver,
                              save_dir=os.path.join(
                                  os.path.dirname(os.path.abspath(__file__)),
                                  'captures'))
         worker = threading.Thread(target=loop.run_loop,
-                                  args=(hw, driver, shared, args, prof), daemon=True)
+                                  args=(hw, driver, shared, args, prof, det),
+                                  daemon=True)
         worker.start()
 
         print()

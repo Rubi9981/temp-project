@@ -24,6 +24,9 @@
 # 이 파일 자체는 추적
 !.gitignore
 
+# yolo 모델 가중치
+!best_v3.pt
+
 # 가상환경/캐시 안의 .py는 위 규칙보다 우선해서 제외
 .venv/
 venv/

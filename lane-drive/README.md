@@ -104,11 +104,13 @@ python3 drive.py --replay ../project/captures --no-web   # 3) 주행 로직 통�
 | `loop.py` | 주행 루프, 스레드 간 공유 상태, 단계별 소요시간 프로파일러 |
 | `hud.py` | 화면 위에 검출/제어 상태 그리기 |
 | `webui.py` | Flask 웹 디버그 대시보드 (HTML 인라인) |
+| `yolo.py` | YOLOv8 객체 탐지 (선택 — `--yolo` 로 켠다) |
 
 ```
 drive.py ──> hardware  (카메라/서보/모터, 또는 replay)
         ├──> driver    (한 프레임 → 조향/구동 명령)
         ├──> loop      ──> hud   (화면 그리기)
+        │          └──> yolo  (--yolo 일 때만)
         └──> webui     (브라우저 대시보드)
 ```
 
@@ -305,6 +307,46 @@ Mac 기준 프레임당 `warp 0.55ms + adaptive 0.50ms + sliding 1.32ms = 약 2.
 `step` 하나가 이미 프레임 주기(33.3ms)를 넘으므로, 나머지를 아무리 줄여도
 30fps 에는 닿지 않는다. 30fps 가 필요하면 `step` 자체를 줄여야 한다
 (해상도 축소 또는 ROI 축소).
+
+### 객체 탐지 (`yolo.py`) — 선택
+
+`object_detection/best_v3.pt` (직접 학습한 YOLOv8n, 7클래스 `car_red /
+car_white / human / left / red / right / right_sign`)로 프레임 안의 객체를
+탐지해 **상태표의 OBJECTS 행에만 표시한다.** 주행 제어에는 관여하지 않고
+화면에 박스도 그리지 않는다.
+
+```bash
+python3 drive.py --yolo                          # 매 15프레임마다 추론
+python3 drive.py --yolo --yolo-every 30 --yolo-imgsz 448
+```
+
+**기본은 꺼짐이다.** `--yolo` 를 주지 않으면 `ultralytics` 를 import 조차 하지
+않으므로, 미설치 환경에서도 주행은 그대로 돌아간다.
+
+**프레임을 채널 변환하지 말 것.** 이 모델은 `Afb1Hardware.read()` 가
+`COLOR_BGR2RGB` 스왑을 한 뒤 저장된 프레임(`collect.py` 산출물)으로 학습됐다.
+`obstacles/` 1046장 확인 결과 주행 루프의 `frame` 을 그대로 넣으면 평균 conf
+0.781(conf>0.7 이 74%)이지만, 채널을 뒤집으면 0.516(28%)으로 떨어진다.
+`raspi/L_7_YOLO.py` 는 스왑을 안 하는데 그건 다른 모델 기준이라 따라가면 안 된다.
+
+`--yolo-imgsz` 를 낮추면 빨라지는 대신 **탐지를 잃는다** (150장, 640 결과 기준):
+
+| imgsz | 검출 수 | 640과 결과가 같은 프레임 | Mac(MPS) |
+|---|---|---|---|
+| **640 (학습값)** | 117 | — | 33.7 ms |
+| 448 | 105 (90%) | 85% | 18.2 ms |
+| 320 | 85 (73%) | 74% | 11.2 ms |
+| 256 | 61 (52%) | 64% | 8.2 ms |
+
+`raspi/L_7_YOLO.py` 가 쓰는 320 은 탐지의 1/4을 잃으므로 기본값은 640 이다.
+
+**주의: 추론은 주행 루프 안에서 동기로 돈다.** 추론하는 프레임에서는 그 시간만큼
+서보 갱신이 늦어진다. 첫 추론의 초기화 비용(Mac 482ms)은 시작 시 미리 한 번
+돌려 없앴지만, 매 추론 자체의 비용은 남는다. Pi 에서 `--profile` 로 `yolo`
+단계를 재보고 `--yolo-every` / `--yolo-imgsz` 를 정할 것. 지연이 문제가 되면
+별도 스레드로 옮기면 되고, 그때 바뀌는 곳은 `loop.py` 한 곳뿐이다.
+
+`.pt` 는 `.gitignore` 에 걸려 추적되지 않으므로 **Pi 로 따로 복사해야 한다.**
 
 ## 라벨링 (`label_gt.py`)
 

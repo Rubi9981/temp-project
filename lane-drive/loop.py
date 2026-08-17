@@ -60,15 +60,18 @@ class Shared:
         self.jpeg = None            # 최신 HUD 프레임 (JPEG bytes)
         self.raw = None             # 최신 원본 프레임 (캡처 저장용)
         self.running = True
+        # objects 는 첫 프레임 전에도 웹이 폴링하므로 기본값이 있어야 한다
+        # (없으면 화면에 undefined 가 뜬다)
         self.tel = {'mode': 'STOP', 'fps': 0.0, 'fps_avg': 0.0,
                     'servo': cfg.SERVO_CENTER, 'motor': 0, 'status': 'IDLE',
-                    'halted': False, 'frames': 0}
+                    'halted': False, 'frames': 0, 'objects': '-'}
 
 
 # ==============================================================================
 # 루프
 # ==============================================================================
-def run_loop(hw, driver, shared, args, prof=None):
+def run_loop(hw, driver, shared, args, prof=None, det=None):
+    """det 는 yolo.Detector 또는 None. None 이면 객체 탐지를 아예 돌리지 않는다."""
     t0 = time.time()
     last_log = 0
     prof = prof or Profiler(False)
@@ -94,6 +97,15 @@ def run_loop(hw, driver, shared, args, prof=None):
             prof.add('step', time.perf_counter() - t)
 
             n = driver.stats['frames']
+
+            # 객체 탐지. BEV 가 아니라 원본 카메라 프레임을 그대로 넣는다.
+            # 동기 호출이라 이 프레임에서는 추론 시간만큼 루프가 멈춘다 —
+            # 그래서 매 프레임이 아니라 --yolo-every 마다만 돌린다.
+            if det is not None and n % args.yolo_every == 0:
+                t = time.perf_counter()
+                det.infer(frame)
+                prof.add('yolo', time.perf_counter() - t)
+
             stamps.append(time.time())
             fps_inst = ((len(stamps) - 1) / (stamps[-1] - stamps[0])
                         if len(stamps) > 1 and stamps[-1] > stamps[0] else 0.0)
@@ -102,7 +114,8 @@ def run_loop(hw, driver, shared, args, prof=None):
             tel = {'mode': driver.mode, 'fps': fps_inst, 'fps_avg': fps_avg,
                    'servo': int(round(driver.servo_cmd)), 'motor': driver.motor_cmd,
                    'status': 'OK' if ctrl.ok else 'NO LANE',
-                   'halted': driver.stopped, 'frames': n}
+                   'halted': driver.stopped, 'frames': n,
+                   'objects': det.summary if det is not None else '-'}
 
             if args.web or args.window:
                 t = time.perf_counter()
