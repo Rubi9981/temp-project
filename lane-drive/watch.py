@@ -274,10 +274,30 @@ def make_app(shared, man):
 # 루프
 # ==============================================================================
 def run_loop(hw, man, det, shared, args, prof=None):
+    """카메라를 읽어 워커에 넘기는 것만 한다.
+
+    추론과 화면(박스 그리기 + JPEG 인코딩)은 각각 별도 스레드로 나간다.
+    그래야 탐지를 켜도 영상이 끊기지 않아 조종이 가능하다 —
+    느린 영상으로 차를 모는 것 자체가 위험하기 때문이다.
+    """
     stamps = collections.deque(maxlen=31)
     frames = 0
     last_log = 0
     prof = prof or looplib.Profiler(False)
+    prof_bg = looplib.Profiler(prof.enabled)
+
+    def _display(item):
+        frame, detecting = item
+        vis = yolo.draw_boxes(frame, det.boxes) if detecting else frame
+        ok, buf = cv2.imencode('.jpg', vis,
+                               [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
+        if ok:
+            with shared.lock:
+                shared.jpeg = buf.tobytes()
+
+    disp_w = looplib.Worker(_display, 'display', prof_bg)
+    yolo_w = looplib.Worker(det.infer, 'yolo', prof_bg)
+    workers = [disp_w, yolo_w]
 
     try:
         while shared.running:
@@ -290,27 +310,17 @@ def run_loop(hw, man, det, shared, args, prof=None):
             frame = cv2.resize(frame, (cfg.W, cfg.H))
             frames += 1
 
-            # 탐지. 프레임을 그대로 넣는다 (채널 변환 금지 — yolo.py docstring).
-            # 건너뛴 프레임에서는 직전 박스를 그대로 그린다.
+            # 탐지. 프레임을 그대로 넘긴다 (채널 변환 금지 — yolo.py docstring).
+            # 워커가 바쁘면 버린다. 화면은 직전 박스를 그대로 쓴다.
             if man.detecting and frames % args.detect_every == 0:
-                t = time.perf_counter()
-                det.infer(frame)
-                prof.add('yolo', time.perf_counter() - t)
-            t = time.perf_counter()
-            vis = yolo.draw_boxes(frame, det.boxes) if man.detecting else frame
-            prof.add('draw', time.perf_counter() - t)
+                yolo_w.offer(frame)
+            disp_w.offer((frame, man.detecting))
 
             stamps.append(time.time())
             fps = ((len(stamps) - 1) / (stamps[-1] - stamps[0])
                    if len(stamps) > 1 and stamps[-1] > stamps[0] else 0.0)
 
-            t = time.perf_counter()
-            ok, buf = cv2.imencode('.jpg', vis,
-                                   [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
-            prof.add('encode', time.perf_counter() - t)
             with shared.lock:
-                if ok:
-                    shared.jpeg = buf.tobytes()
                 shared.tel = {'detect': man.detecting,
                               'objects': det.summary if man.detecting else '-',
                               'fps': fps, 'frames': frames,
@@ -324,6 +334,10 @@ def run_loop(hw, man, det, shared, args, prof=None):
                       f'servo={man.servo_cmd:3d} motor={man.motor_cmd:4d}')
                 if prof.enabled:
                     print(prof.report())
+                    bg = prof_bg.report('백그라운드 ms 평균/최대', None)
+                    if bg:
+                        drops = '  '.join(f'{w.name}={w.dropped}' for w in workers)
+                        print(bg + f'   버린 프레임 {drops}')
 
     except KeyboardInterrupt:
         print('\n사용자 종료')
@@ -331,10 +345,13 @@ def run_loop(hw, man, det, shared, args, prof=None):
         print(f'\n[에러] 루프 예외: {exc}')
     finally:
         shared.running = False
+        # 모터를 세우는 것이 최우선 — 워커 정리보다 먼저 한다
         try:
             man.neutral()
         except Exception:
             pass
+        for w in workers:
+            w.stop()
 
 
 def main():

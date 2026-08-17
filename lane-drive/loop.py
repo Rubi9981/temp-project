@@ -7,6 +7,7 @@
 """
 import collections
 import os
+import queue
 import threading
 import time
 
@@ -40,7 +41,13 @@ class Profiler:
         self.d.setdefault(name, collections.deque(maxlen=self.window)).append(
             seconds * 1000.0)
 
-    def report(self):
+    def report(self, title='루프 ms 평균/최대', total_label='한 바퀴'):
+        """단계별 평균/최대를 한 줄로. total_label=None 이면 합계를 생략한다.
+
+        루프용과 백그라운드 워커용을 따로 찍으려고 접두사를 인자로 뺐다.
+        워커는 서로, 그리고 루프와 **병렬로** 도니까 시간을 더하는 것이
+        의미가 없다 — 그래서 백그라운드 줄에서는 합계를 찍지 않는다.
+        """
         if not self.d:
             return ''
         parts, total = [], 0.0
@@ -48,7 +55,70 @@ class Profiler:
             arr = np.array(v)
             total += arr.mean()
             parts.append(f'{k}={arr.mean():.1f}/{arr.max():.1f}')
-        return f'  [prof ms 평균/최대] ' + '  '.join(parts) + f'   합계={total:.1f}'
+        line = f'  [{title}] ' + '  '.join(parts)
+        return line if total_label is None else line + f'   {total_label}={total:.1f}'
+
+
+# ==============================================================================
+# 백그라운드 워커
+# ==============================================================================
+class Worker:
+    """한 칸짜리 큐 + 데몬 스레드. 밀리면 새 작업을 **버린다**.
+
+    제어와 무관한 일(화면 그리기, JPEG 인코딩, YOLO 추론, 프레임 저장)을
+    주행 루프 밖으로 빼는 데 쓴다. OpenCV/NCNN 함수는 연산 중 GIL 을 놓으므로
+    실제로 다른 코어에서 겹쳐 돈다.
+
+    **쌓지 않고 버리는 것이 핵심이다.** 큐에 모아두면 브라우저에 과거 영상이
+    나오고 지연이 계속 늘어난다. 늦은 프레임은 이미 쓸모가 없다.
+    """
+
+    def __init__(self, fn, name, prof=None, stage=None):
+        self.fn = fn
+        self.name = name
+        self.prof = prof
+        self.stage = stage or name
+        self.dropped = 0
+        self.done = 0
+        self.q = queue.Queue(maxsize=1)
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self.thread.start()
+
+    def offer(self, item):
+        """작업을 넘긴다. 워커가 바쁘면 버리고 False 를 돌려준다."""
+        try:
+            self.q.put_nowait(item)
+            return True
+        except queue.Full:
+            self.dropped += 1
+            return False
+
+    def _run(self):
+        while True:
+            item = self.q.get()
+            if item is None:
+                break
+            t = time.perf_counter()
+            try:
+                self.fn(item)
+            except Exception as exc:
+                # 워커가 죽어도 주행은 계속돼야 한다
+                print(f'[{self.name}] 예외: {exc}')
+            else:
+                self.done += 1
+            if self.prof is not None:
+                self.prof.add(self.stage, time.perf_counter() - t)
+
+    def stop(self, timeout=2.0):
+        try:                                # 자리를 비워야 종료 신호가 들어간다
+            self.q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self.q.put_nowait(None)
+        except queue.Full:
+            pass
+        self.thread.join(timeout)
 
 
 # ==============================================================================
@@ -71,15 +141,53 @@ class Shared:
 # 루프
 # ==============================================================================
 def run_loop(hw, driver, shared, args, prof=None, det=None):
-    """det 는 yolo.Detector 또는 None. None 이면 객체 탐지를 아예 돌리지 않는다."""
+    """주행 루프. det 는 yolo.Detector 또는 None.
+
+    제어와 무관한 일(화면, YOLO, 녹화)은 Worker 로 내보내고 이 루프에는
+    read -> step 만 남긴다. 그래야 서보 갱신 주기가 일정해진다 — 예전에는
+    YOLO 가 도는 프레임마다 제어 주기가 5배까지 튀었다.
+    """
     t0 = time.time()
     last_log = 0
     prof = prof or Profiler(False)
+    prof_bg = Profiler(prof.enabled)     # 워커 시간은 따로 잰다 (합계가 섞이지 않게)
 
     # 순간 FPS 는 최근 N프레임의 실제 간격으로 잰다. 누적 평균은 프레임이
     # 쌓일수록 둔해져서 주행 중 저하를 못 잡아낸다.
     stamps = collections.deque(maxlen=31)
     pace = (1.0 / args.pace_fps) if args.pace_fps > 0 else 0.0
+
+    # --window 는 cv2.imshow 를 써야 하는데 워커 스레드에서 부르면 플랫폼에
+    # 따라 불안정하다. 모니터 붙이고 디버깅할 때만 쓰는 옵션이므로 그때는
+    # 예전처럼 루프 안에서 그린다 (성능을 포기한다).
+    inline_display = args.window
+    workers = []
+
+    def _display(item):
+        roi, y_start, res, ctrl, tel = item
+        vis = hud.overlay(roi, y_start, res, ctrl, tel)
+        ok, buf = cv2.imencode('.jpg', vis,
+                               [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
+        if ok:
+            with shared.lock:
+                shared.jpeg = buf.tobytes()
+
+    disp_w = None
+    if args.web and not inline_display:
+        disp_w = Worker(_display, 'display', prof_bg)
+        workers.append(disp_w)
+
+    yolo_w = None
+    if det is not None:
+        yolo_w = Worker(det.infer, 'yolo', prof_bg)
+        workers.append(yolo_w)
+
+    rec_w = None
+    if args.record:
+        # 저장 형식을 captures/ 와 똑같이 맞춘다 (채널 스왑 후 640x480).
+        # 그래야 review.py / evaluate.py 가 동일하게 처리한다.
+        rec_w = Worker(lambda it: cv2.imwrite(it[0], it[1]), 'record', prof_bg)
+        workers.append(rec_w)
 
     try:
         while shared.running:
@@ -93,18 +201,17 @@ def run_loop(hw, driver, shared, args, prof=None, det=None):
             frame = cv2.resize(frame, (cfg.W, cfg.H))
 
             t = time.perf_counter()
-            ctrl, warped, res, y_start = driver.step(frame)
+            ctrl, roi, res, y_start = driver.step(frame)
             prof.add('step', time.perf_counter() - t)
 
             n = driver.stats['frames']
 
-            # 객체 탐지. BEV 가 아니라 원본 카메라 프레임을 그대로 넣는다.
-            # 동기 호출이라 이 프레임에서는 추론 시간만큼 루프가 멈춘다 —
-            # 그래서 매 프레임이 아니라 --yolo-every 마다만 돌린다.
-            if det is not None and n % args.yolo_every == 0:
-                t = time.perf_counter()
-                det.infer(frame)
-                prof.add('yolo', time.perf_counter() - t)
+            # 객체 탐지. BEV 가 아니라 원본 카메라 프레임을 그대로 넘긴다
+            # (채널 변환 금지 — yolo.py docstring). 워커가 아직 이전 프레임을
+            # 처리 중이면 이번 것은 버린다. --yolo-every 는 "제안 주기"로,
+            # NCNN 이 코어를 독점해 제어 루프를 굶기지 않게 하는 조절 손잡이다.
+            if yolo_w is not None and n % args.yolo_every == 0:
+                yolo_w.offer(frame)
 
             stamps.append(time.time())
             fps_inst = ((len(stamps) - 1) / (stamps[-1] - stamps[0])
@@ -117,35 +224,29 @@ def run_loop(hw, driver, shared, args, prof=None, det=None):
                    'halted': driver.stopped, 'frames': n,
                    'objects': det.summary if det is not None else '-'}
 
-            if args.web or args.window:
-                t = time.perf_counter()
-                vis = hud.overlay(warped, y_start, res, ctrl, tel)
-                prof.add('overlay', time.perf_counter() - t)
+            # 텔레메트리와 원본 프레임은 주 루프가 소유한다 — 참조 대입뿐이라
+            # 비용이 없고, 화면 워커가 밀려도 상태표는 살아 있다.
+            with shared.lock:
+                shared.tel = tel
+                shared.raw = frame
+
+            if inline_display:
+                vis = hud.overlay(roi, y_start, res, ctrl, tel)
                 if args.web:
-                    t = time.perf_counter()
-                    ok, buf = cv2.imencode('.jpg', vis,
-                                           [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
-                    prof.add('encode', time.perf_counter() - t)
+                    ok, buf = cv2.imencode(
+                        '.jpg', vis, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality])
                     if ok:
                         with shared.lock:
                             shared.jpeg = buf.tobytes()
-                            shared.raw = frame
-                            shared.tel = tel
-                if args.window:
-                    cv2.imshow('drive', vis)
-                    if (cv2.waitKey(1) & 0xFF) in (27, ord('q')):
-                        print('\n창에서 종료')
-                        break
-            else:
-                with shared.lock:
-                    shared.tel = tel
+                cv2.imshow('drive', vis)
+                if (cv2.waitKey(1) & 0xFF) in (27, ord('q')):
+                    print('\n창에서 종료')
+                    break
+            elif disp_w is not None:
+                disp_w.offer((roi, y_start, res, ctrl, tel))
 
-            # 저장 형식을 captures/ 와 똑같이 맞춘다 (채널 스왑 후 640x480).
-            # 그래야 review.py / evaluate.py 가 동일하게 처리한다.
-            if args.record and n % args.record_every == 0:
-                t = time.perf_counter()
-                cv2.imwrite(os.path.join(args.record, f'frame_{n:06d}.jpg'), frame)
-                prof.add('record', time.perf_counter() - t)
+            if rec_w is not None and n % args.record_every == 0:
+                rec_w.offer((os.path.join(args.record, f'frame_{n:06d}.jpg'), frame))
 
             if args.log_every and n - last_log >= args.log_every:
                 last_log = n
@@ -158,6 +259,10 @@ def run_loop(hw, driver, shared, args, prof=None, det=None):
                     print(head + f'검출 실패 ({ctrl.reason})')
                 if prof.enabled:
                     print(prof.report())
+                    bg = prof_bg.report('백그라운드 ms 평균/최대', None)
+                    if bg:
+                        drops = '  '.join(f'{w.name}={w.dropped}' for w in workers)
+                        print(bg + (f'   버린 프레임 {drops}' if drops else ''))
 
             # 페이싱. 카메라 get_image() 가 블로킹이면 이미 카메라가 속도를
             # 정하므로 여기서 더 자면 프레임 경계를 놓쳐 반토막 난다.
@@ -173,11 +278,14 @@ def run_loop(hw, driver, shared, args, prof=None, det=None):
         print(f'\n[에러] 주행 루프 예외: {exc}')
     finally:
         shared.running = False
+        # 모터를 세우는 것이 최우선 — 워커 정리보다 먼저 한다
         try:
             driver.apply_motor(0)
             driver.apply_servo(cfg.SERVO_CENTER)
         except Exception:
             pass
+        for w in workers:
+            w.stop()
 
 
 def print_summary(driver, hw, elapsed):

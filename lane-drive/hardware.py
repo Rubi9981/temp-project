@@ -5,6 +5,10 @@
     Afb1Hardware   — 라즈베리파이 실차 (afb1 모듈)
     ReplayHardware — 저장 이미지를 먹여 루프 로직만 검증 (개발 PC)
 
+**read() 는 매번 새 배열을 돌려줘야 한다.** 주행 루프가 프레임을 백그라운드
+워커(화면/YOLO/녹화)에 복사 없이 넘기기 때문이다 (loop.Worker 참조).
+버퍼를 재사용하도록 바꾸면 워커가 처리하는 동안 내용이 덮어써진다.
+
 afb1 API 는 raspi/ 예제에서 확인된 것만 쓴다:
     gpio.init() / gpio.stby(1) / gpio.servo(30~150) / gpio.motor(speed) / gpio.stop_all()
     camera.init(w, h, fps) / camera.get_image() / camera.release_camera()
