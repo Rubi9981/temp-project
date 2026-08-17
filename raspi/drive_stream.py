@@ -32,13 +32,11 @@ import sys
 import threading
 import time
 
-# project_v2 모듈(bev, binarize, config, detect, control) 경로 추가
+# project_v2 모듈(bev, binarize, config, detect) 최우선 경로 추가
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_V2_DIR = os.path.abspath(os.path.join(CURRENT_DIR, '..', 'project_v2'))
-PROJECT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, '..', 'project'))
-for p in [PROJECT_V2_DIR, PROJECT_DIR]:
-    if p not in sys.path and os.path.exists(p):
-        sys.path.insert(0, p)
+if PROJECT_V2_DIR not in sys.path and os.path.exists(PROJECT_V2_DIR):
+    sys.path.insert(0, PROJECT_V2_DIR)
 
 import cv2
 import numpy as np

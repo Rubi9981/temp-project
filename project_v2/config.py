@@ -100,6 +100,31 @@ CAMERA_MATRIX = None    # np.ndarray (3,3)
 DIST_COEFFS = None      # np.ndarray (5,)
 
 
+# -----------------------------
+# 자율주행 제어 파라미터
+# -----------------------------
+CAMERA_FPS = 30
+SERVO_CENTER = 90
+SERVO_MIN = 30
+SERVO_MAX = 150
+MAX_FAIL_FRAMES = 10
+SERVO_EMA_ALPHA = 0.5
+LOOKAHEAD_CM = 40.0
+SERVO_PER_DEG = 1.5
+DRIVE_SPEED = 40
+
+import dataclasses
+
+@dataclasses.dataclass
+class Metric:
+    measured: bool = False
+    vehicle_center_x_px: float = 320.0
+    px_per_cm_x: float = 5.0
+    px_per_cm_y: float = 5.0
+
+def get_metric():
+    return Metric()
+
 def get_src_points():
     """calib.json 이 있으면 그 값을, 없으면 기본값을 돌려준다."""
     if os.path.exists(CALIB_PATH):
