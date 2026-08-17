@@ -283,7 +283,7 @@ python3 drive.py --dry-run --profile --log-every 30
 |---|---|---|
 | `read` 가 30ms 근처 | `get_image()` 가 블로킹하며 페이싱 중 | `--pace-fps 0` (우리 sleep 제거) |
 | `step` 최대값이 평균의 3배 이상 | 마스크 밀도에 따른 검출 부하 변동 | `--binarize tophat`, ROI 축소 |
-| `encode` 가 큼 | JPEG 인코딩 | `--jpeg-quality 50` |
+| `encode` 가 큼 | JPEG 인코딩 (기본 품질 50) | `--jpeg-quality 35`, 또는 `--no-web` |
 | `record` 가 큼 | SD카드 쓰기 지연 | `--record-every` 늘리기 |
 | 전체가 서서히 증가 | 발열 스로틀링 | `vcgencmd measure_temp` |
 
@@ -298,9 +298,13 @@ python3 drive.py --dry-run --profile --log-every 30
 ### 성능
 
 Mac 기준 프레임당 `warp 0.55ms + adaptive 0.50ms + sliding 1.32ms = 약 2.4ms`.
-Pi 는 5~10배 느리다고 보면 15~25ms 로 30fps 는 무리 없을 전망이다.
-**다만 이건 추정이며 실측이 필요하다** — `drive.py` 가 fps 를 찍어준다.
 `tophat` 은 Mac 에서 0.7ms 더 든다.
+
+**Pi 실측으로는 30fps 가 나오지 않았다.** 웹을 켠 상태에서
+`read 5.2 + step 42.6 + overlay 4.4 + encode 10.3 = 62.4ms` 로 **17fps** 였다.
+`step` 하나가 이미 프레임 주기(33.3ms)를 넘으므로, 나머지를 아무리 줄여도
+30fps 에는 닿지 않는다. 30fps 가 필요하면 `step` 자체를 줄여야 한다
+(해상도 축소 또는 ROI 축소).
 
 ## 라벨링 (`label_gt.py`)
 

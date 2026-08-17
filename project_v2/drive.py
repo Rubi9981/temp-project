@@ -69,7 +69,7 @@ def main():
     # 디버그 화면
     ap.add_argument('--no-web', action='store_true', help='웹 대시보드 끄기')
     ap.add_argument('--port', type=int, default=5000)
-    ap.add_argument('--jpeg-quality', type=int, default=75, help='스트리밍 JPEG 품질')
+    ap.add_argument('--jpeg-quality', type=int, default=50, help='스트리밍 JPEG 품질')
     ap.add_argument('--window', action='store_true',
                     help='cv2.imshow 창도 띄우기 (Pi에 모니터/VNC 가 있을 때)')
     # 튜닝
