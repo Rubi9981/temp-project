@@ -9,6 +9,7 @@ drive.py 에서 `import driver as driverlib` 로 쓴다 — main() 의 지역 �
 """
 import threading
 
+import cv2
 import numpy as np
 
 import bev as bevlib
@@ -38,6 +39,11 @@ class Driver:
         self.alpha = cfg.SERVO_EMA_ALPHA if ema_alpha is None else ema_alpha
         self.invert_servo = invert_servo
         self.manual_speed = cfg.DRIVE_SPEED if manual_speed is None else manual_speed
+
+        # BEV 변환 행렬은 보정점이 바뀌지 않는 한 고정이다. 시작할 때 한 번만
+        # 만들어 두고, 매 프레임 ROI 밴드만 곧바로 warp 한다 — 전체 640x480 을
+        # 만든 뒤 55%를 버리던 낭비가 사라진다.
+        self.roi_matrix, self.y_start, self.roi_h = bevlib.roi_warp_matrix()
 
         self.hw_lock = threading.Lock()
         self.mode = mode                    # 'AUTO' | 'MANUAL' | 'STOP'
@@ -76,11 +82,15 @@ class Driver:
         return True
 
     def step(self, frame):
-        """한 프레임 처리. (ctrl, warped, res, y_start) 를 돌려준다."""
+        """한 프레임 처리. (ctrl, roi, res, y_start) 를 돌려준다.
+
+        두 번째 반환값은 **ROI 밴드**다 (예전에는 전체 BEV 였다). 화면에 그릴
+        때도 이것을 쓴다 — 분석하지 않는 위쪽 55%는 애초에 만들지 않는다.
+        """
         self.stats['frames'] += 1
 
-        warped, _ = bevlib.warp_image(frame)
-        roi, y_start = bevlib.roi_of(warped)
+        roi = cv2.warpPerspective(frame, self.roi_matrix, (cfg.W, self.roi_h))
+        y_start = self.y_start
         mask = self.bin_fn(roi)
         res = self.det_fn(mask)
         ctrl = self.pp(res, roi.shape[0], y_start)
@@ -88,11 +98,11 @@ class Driver:
         if self.mode == 'STOP':
             # 인지는 계속 돌린다 — 화면은 살아 있어야 상태를 볼 수 있다
             self.apply_motor(0)
-            return ctrl, warped, res, y_start
+            return ctrl, roi, res, y_start
 
         if self.mode == 'MANUAL':
             # 조향/구동은 웹 핸들러가 직접 넣는다. 여기서는 건드리지 않는다.
-            return ctrl, warped, res, y_start
+            return ctrl, roi, res, y_start
 
         if ctrl.ok:
             self.stats['ok'] += 1
@@ -121,4 +131,4 @@ class Driver:
                 self.apply_servo(self.servo_cmd)
                 self.apply_motor(self.speed)
 
-        return ctrl, warped, res, y_start
+        return ctrl, roi, res, y_start

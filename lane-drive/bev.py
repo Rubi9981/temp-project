@@ -17,20 +17,45 @@ METRIC_ROWS = tuple(range(270, 470, 20))
 # 1) 변환
 # -----------------------------
 def warp_image(image, src_pts=None, width=cfg.W, height=cfg.H):
-    """원본 이미지를 BEV로 변환하고 변환 행렬을 함께 돌려준다."""
+    """원본 이미지를 BEV로 변환하고 변환 행렬을 함께 돌려준다.
+
+    도구(review/evaluate/tune_src)가 쓰는 경로다. 주행 루프는 ROI 만 필요하므로
+    roi_warp_matrix() 로 행렬을 한 번 만들어 재사용한다.
+    """
+    matrix = warp_image_matrix(src_pts, width, height)
+    warped = cv2.warpPerspective(image, matrix, (width, height))
+    return warped, matrix
+
+
+def roi_warp_matrix(src_pts=None, width=cfg.W, height=cfg.H):
+    """ROI 밴드를 곧바로 만드는 변환 행렬과 (y_start, roi_height) 를 돌려준다.
+
+    warp_image() 는 640x480 전체를 만든 뒤 roi_of() 로 아래 45%만 쓰고 나머지를
+    버린다 — 쓰지 않을 픽셀을 리샘플링하는 셈이다. dst 사각형을 y_start 만큼
+    평행이동시키면 처음부터 ROI 크기로만 만들 수 있고, 결과는
+    roi_of(warp_image(img)[0])[0] 와 픽셀 단위로 동일하다.
+
+    행렬은 보정점이 바뀌지 않는 한 고정이므로 주행 루프는 시작할 때 한 번만
+    계산해 재사용한다 (calib.json 이 있으면 warp_image 가 매 프레임 그 파일을
+    읽는 문제도 함께 사라진다).
+    """
+    matrix = warp_image_matrix(src_pts, width, height)
+    y_start = int(height * cfg.ROI_Y_RATIO)
+    shift = np.array([[1, 0, 0], [0, 1, -y_start], [0, 0, 1]], dtype=np.float64)
+    return shift @ matrix, y_start, height - y_start
+
+
+def warp_image_matrix(src_pts=None, width=cfg.W, height=cfg.H):
+    """warp_image 가 쓰는 변환 행렬만 계산한다."""
     if src_pts is None:
         src_pts = cfg.get_src_points()
-
     dst_points = np.array([
         [0, 0],
         [width - 1, 0],
         [width - 1, height - 1],
         [0, height - 1],
     ], dtype=np.float32)
-
-    matrix = cv2.getPerspectiveTransform(np.asarray(src_pts, np.float32), dst_points)
-    warped = cv2.warpPerspective(image, matrix, (width, height))
-    return warped, matrix
+    return cv2.getPerspectiveTransform(np.asarray(src_pts, np.float32), dst_points)
 
 
 def project_point(pt_xy, matrix):

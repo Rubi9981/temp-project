@@ -121,6 +121,10 @@ def sliding_window(mask,
         if seg.size and seg.max() >= min_peak:
             bases[side] = int(np.argmax(seg)) + offset
 
+    # nonzero() 는 행 우선이라 nonzero_y 가 이미 오름차순이다. 덕분에 윈도우의
+    # y 범위를 searchsorted 로 잘라낼 수 있고, x 비교는 그 밴드(전체의 1/nwindows)
+    # 에서만 하면 된다. 예전에는 윈도우 18개(좌우x9)마다 전체 nonzero 배열을
+    # 네 번씩 비교했다 — 마스크가 조밀하면 이게 검출 시간의 대부분이었다.
     nonzero_y, nonzero_x = binary.nonzero()
     window_h = h // nwindows
 
@@ -137,12 +141,14 @@ def sliding_window(mask,
             x_high = current + margin
             boxes.append((x_low, y_low, x_high, y_high))
 
-            hit = ((nonzero_y >= y_low) & (nonzero_y < y_high) &
-                   (nonzero_x >= x_low) & (nonzero_x < x_high)).nonzero()[0]
-            collected.append(hit)
+            lo = np.searchsorted(nonzero_y, y_low, 'left')
+            hi = np.searchsorted(nonzero_y, y_high, 'left')
+            band_x = nonzero_x[lo:hi]
+            sel = ((band_x >= x_low) & (band_x < x_high)).nonzero()[0]
+            collected.append(sel + lo)          # 원래 배열 기준 인덱스로 되돌린다
 
-            if len(hit) > minpix:
-                current = int(nonzero_x[hit].mean())
+            if len(sel) > minpix:
+                current = int(band_x[sel].mean())
 
         idx = np.concatenate(collected) if collected else np.array([], int)
         if len(idx) >= min_fitpix:

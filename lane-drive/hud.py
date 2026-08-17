@@ -9,37 +9,41 @@ import bev as bevlib
 import config as cfg
 
 
-def overlay(warped, y_start, res, ctrl, tel):
-    """BEV 위에 주행 상태를 그린다.
+def overlay(roi, y_start, res, ctrl, tel):
+    """ROI 밴드 위에 주행 상태를 그린다.
+
+    첫 인자는 **분석에 쓴 ROI 밴드**다 (전체 BEV 가 아니다). 위쪽 55%는
+    검출에 쓰지 않으므로 애초에 만들지 않는다 — driver.Driver.step 참조.
+    다항식은 ROI 좌표계라 그대로 그리면 되고, ctrl.goal_bev 만 전체 BEV
+    좌표라 y_start 만큼 올려서 찍는다.
 
     cv2.putText 는 Hershey 폰트라 ASCII 만 그릴 수 있다.
     """
-    vis = warped.copy()
+    vis = roi.copy()
     h, w = vis.shape[:2]
 
-    # ROI 가이드 + 화면 중앙 기준선
-    cv2.rectangle(vis, (0, y_start), (w - 1, h - 1), (255, 120, 0), 2)
-    cv2.line(vis, (w // 2, y_start), (w // 2, h), (0, 0, 255), 1)
+    # ROI 테두리 + 화면 중앙 기준선
+    cv2.rectangle(vis, (0, 0), (w - 1, h - 1), (255, 120, 0), 2)
+    cv2.line(vis, (w // 2, 0), (w // 2, h), (0, 0, 255), 1)
 
     # 좌우 차선 다항식
     for fit, color in ((res.fit_left, (255, 128, 0)), (res.fit_right, (0, 128, 255))):
         if fit is not None:
-            pts = bevlib.curve_points(fit, 0, h - y_start,
-                                      y_offset=y_start).astype(np.int32)
+            pts = bevlib.curve_points(fit, 0, h).astype(np.int32)
             cv2.polylines(vis, [pts], False, color, 2)
 
     # 주행 목표 경로
     if res.fit_center is not None:
-        pts = bevlib.curve_points(res.fit_center, 0, h - y_start,
-                                  y_offset=y_start).astype(np.int32)
+        pts = bevlib.curve_points(res.fit_center, 0, h).astype(np.int32)
         cv2.polylines(vis, [pts], False, (0, 0, 0), 6)
         cv2.polylines(vis, [pts], False, (0, 255, 255), 3)
 
-    # Pure Pursuit 목표점
+    # Pure Pursuit 목표점 — goal_bev 는 전체 BEV 좌표라 ROI 기준으로 내린다
     if ctrl.ok:
         gx, gy = ctrl.goal_bev
-        cv2.circle(vis, (int(gx), int(gy)), 10, (0, 0, 0), -1)
-        cv2.circle(vis, (int(gx), int(gy)), 8, (255, 0, 255), -1)
+        gy = int(gy) - y_start
+        cv2.circle(vis, (int(gx), gy), 10, (0, 0, 0), -1)
+        cv2.circle(vis, (int(gx), gy), 8, (255, 0, 255), -1)
 
     # 좌상단 상태
     mode_color = {'AUTO': (0, 255, 0),
