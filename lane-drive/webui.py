@@ -55,6 +55,7 @@ PAGE = """
       <tr><td>STATUS</td><td id="status">-</td></tr>
       <tr><td>FRAMES</td><td id="frames">-</td></tr>
       <tr><td>OBJECTS</td><td id="objects">-</td></tr>
+      <tr><td>LINK</td><td id="link">-</td></tr>
     </table>
     <div>
       <button class="auto"   id="b_AUTO"   onclick="setMode('AUTO')">AUTO</button>
@@ -111,7 +112,7 @@ addEventListener('blur',()=>{for(const k of held)keyUp(k); held.clear();});
 
 setInterval(async()=>{
   const r=await fetch('/api/status'); const s=await r.json();
-  for(const k of ['mode','servo','motor','status','frames','objects'])
+  for(const k of ['mode','servo','motor','status','frames','objects','link'])
     document.getElementById(k).textContent=s[k];
   document.getElementById('fps').textContent=s.fps.toFixed(1);
   document.getElementById('fps_avg').textContent=s.fps_avg.toFixed(1);

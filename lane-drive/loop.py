@@ -134,7 +134,7 @@ class Shared:
         # (없으면 화면에 undefined 가 뜬다)
         self.tel = {'mode': 'STOP', 'fps': 0.0, 'fps_avg': 0.0,
                     'servo': cfg.SERVO_CENTER, 'motor': 0, 'status': 'IDLE',
-                    'halted': False, 'frames': 0, 'objects': '-'}
+                    'halted': False, 'frames': 0, 'objects': '-', 'link': '-'}
 
 
 # ==============================================================================
@@ -182,6 +182,10 @@ def run_loop(hw, driver, shared, args, prof=None, det=None):
         yolo_w = Worker(det.infer, 'yolo', prof_bg)
         workers.append(yolo_w)
 
+    # 원격 탐지(yolo_remote.RemoteDetector)일 때만 링크 상태가 있다.
+    # 로컬 추론에는 끊길 링크가 없으므로 워치독도 없다.
+    link_watch = det is not None and hasattr(det, 'link')
+
     rec_w = None
     if args.record:
         # 저장 형식을 captures/ 와 똑같이 맞춘다 (채널 스왑 후 640x480).
@@ -199,6 +203,12 @@ def run_loop(hw, driver, shared, args, prof=None, det=None):
             if frame is None:
                 break
             frame = cv2.resize(frame, (cfg.W, cfg.H))
+
+            # 워치독은 step 보다 먼저 본다 — 이번 프레임부터 바로 서게.
+            # 탐지 결과가 너무 묵었다는 것은 맥과의 링크가 끊겼다는 뜻이고,
+            # 그 상태로 계속 달리면 신호등을 못 보고 교차로에 들어간다.
+            if link_watch:
+                driver.link_halt = not det.link['ok']
 
             t = time.perf_counter()
             ctrl, roi, res, y_start = driver.step(frame)
@@ -222,7 +232,8 @@ def run_loop(hw, driver, shared, args, prof=None, det=None):
                    'servo': int(round(driver.servo_cmd)), 'motor': driver.motor_cmd,
                    'status': 'OK' if ctrl.ok else 'NO LANE',
                    'halted': driver.stopped, 'frames': n,
-                   'objects': det.summary if det is not None else '-'}
+                   'objects': det.summary if det is not None else '-',
+                   'link': getattr(det, 'link_str', '-') if det is not None else '-'}
 
             # 텔레메트리와 원본 프레임은 주 루프가 소유한다 — 참조 대입뿐이라
             # 비용이 없고, 화면 워커가 밀려도 상태표는 살아 있다.

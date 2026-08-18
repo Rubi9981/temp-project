@@ -51,6 +51,9 @@ class Driver:
         self.motor_cmd = 0
         self.fail_streak = 0
         self.stopped = False
+        # 원격 탐지 링크가 끊겼을 때 loop.py 가 세운다. 탐지 결과가 너무
+        # 묵으면 모르는 상태로 달리는 셈이라 세운다 — fail_streak 정지와 같은 철학.
+        self.link_halt = False
         self.stats = {'frames': 0, 'ok': 0, 'fail': 0, 'halt': 0}
 
     # -----------------------------
@@ -102,6 +105,15 @@ class Driver:
 
         if self.mode == 'MANUAL':
             # 조향/구동은 웹 핸들러가 직접 넣는다. 여기서는 건드리지 않는다.
+            return ctrl, roi, res, y_start
+
+        if self.link_halt:
+            # 원격 탐지 결과가 너무 묵었다. 조향은 직전 값을 유지한 채 세운다.
+            if not self.stopped:
+                self.stats['halt'] += 1
+                print('  [정지] 원격 탐지 링크 끊김')
+            self.stopped = True
+            self.apply_motor(0)
             return ctrl, roi, res, y_start
 
         if ctrl.ok:

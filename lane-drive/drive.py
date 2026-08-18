@@ -21,6 +21,7 @@ afb1.flask 는 쓰지 않는다 — 동작을 확인할 수 없어 화면이 안
     python3 drive.py --dry-run                      # 모터 끈 채 확인 (첫 브링업)
     python3 drive.py --speed 40 --record run1       # 주행 + 녹화 (웹 자동 활성)
     python3 drive.py --replay ../project/captures   # 하드웨어 없이 로직 검증
+    python3 drive.py --yolo-remote <맥주소>:5010     # 추론은 맥에 맡긴다
 
 주행 모드 (웹에서 전환):
     AUTO   — Pure Pursuit 자율주행
@@ -95,7 +96,20 @@ def main():
                     help='추론 입력 크기. NCNN 모델은 내보낼 때 고정되므로 '
                          '여기서 바꿔도 통하지 않는다')
     ap.add_argument('--yolo-every', type=int, default=cfg.YOLO_EVERY,
-                    help='N프레임마다 추론. 동기 실행이라 그 프레임에서 루프가 멈춘다')
+                    help='N프레임마다 추론. 별도 스레드로 나가므로 제어 주기에는 '
+                         '영향이 없다')
+    # 원격 추론 — Pi4 로컬 YOLO 가 느려서 맥에 맡긴다. 상대편은 yolo_server.py.
+    ap.add_argument('--yolo-remote', metavar='HOST[:PORT]',
+                    help='맥의 추론 서버로 프레임을 보내 원격 추론한다. --yolo 대신 '
+                         '쓰며, 이때 Pi 에는 ultralytics 도 모델 파일도 필요 없다')
+    ap.add_argument('--yolo-jpeg-quality', type=int, default=cfg.YOLO_JPEG_QUALITY,
+                    help=f'전송용 JPEG 품질 (기본 {cfg.YOLO_JPEG_QUALITY}). '
+                         '75 로 낮추면 46KB->34KB 이고 검출 손실은 1%%다')
+    ap.add_argument('--yolo-timeout', type=float, default=cfg.YOLO_TIMEOUT_S,
+                    help=f'왕복 최대 대기 시간(초, 기본 {cfg.YOLO_TIMEOUT_S})')
+    ap.add_argument('--yolo-watchdog-ms', type=int, default=cfg.YOLO_WATCHDOG_MS,
+                    help=f'탐지 결과가 이 시간(ms) 이상 없으면 모터를 세운다 '
+                         f'(기본 {cfg.YOLO_WATCHDOG_MS}). 0 이면 끈다')
     # 데이터
     ap.add_argument('--record', metavar='DIR',
                     help='주행 프레임을 저장. 나중에 review.py 로 되돌려 본다')
@@ -126,8 +140,31 @@ def main():
 
     # 하드웨어보다 먼저 만든다. 모델 파일이 없거나 ultralytics 가 없으면
     # gpio/카메라를 건드리기 전에 끝내야 정리 없이 죽는 일이 없다.
+    if args.yolo and args.yolo_remote:
+        ap.error('--yolo 와 --yolo-remote 는 함께 쓸 수 없습니다 '
+                 '(로컬 추론이냐 원격 추론이냐를 고르는 것입니다)')
+
     det = None
-    if args.yolo:
+    if args.yolo_remote:
+        # 원격이면 ultralytics 도 모델 파일도 필요 없다. requests 만 있으면 된다.
+        import yolo_remote
+        det = yolo_remote.RemoteDetector(
+            args.yolo_remote, args.yolo_jpeg_quality, args.yolo_timeout,
+            args.yolo_watchdog_ms)
+        print(f'[yolo] 원격 추론  매 {args.yolo_every}프레임  '
+              f'품질={args.yolo_jpeg_quality} 타임아웃={args.yolo_timeout}s '
+              f'워치독={args.yolo_watchdog_ms}ms')
+
+        # 워치독 임계가 추론 시도 간격보다 작으면 정상 주행 중에도 걸린다.
+        # 원격 모드는 Pi CPU 를 안 쓰므로 --yolo-every 를 낮추는 쪽이 맞다.
+        fps = args.pace_fps or cfg.CAMERA_FPS
+        gap_ms = 1000.0 * args.yolo_every / fps + args.yolo_timeout * 1000.0
+        if args.yolo_watchdog_ms and args.yolo_watchdog_ms < 2 * gap_ms:
+            print(f'[경고] 워치독({args.yolo_watchdog_ms}ms)이 추론 시도 간격'
+                  f'(약 {gap_ms:.0f}ms)에 비해 짧습니다. 정상 주행 중에도 정지할 수')
+            print(f'       있습니다. --yolo-every 를 낮추거나 --yolo-watchdog-ms 를 '
+                  f'{int(3 * gap_ms)} 이상으로 잡으세요.')
+    elif args.yolo:
         # import 도 여기서만 한다 — ultralytics 가 없는 Pi 에서도 --yolo 를
         # 안 주면 주행은 그대로 돌아야 한다
         import yolo

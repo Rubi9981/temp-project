@@ -105,6 +105,7 @@ python3 drive.py --replay ../project/captures --no-web   # 3) 주행 로직 통�
 | `hud.py` | 화면 위에 검출/제어 상태 그리기 |
 | `webui.py` | Flask 웹 디버그 대시보드 (HTML 인라인) |
 | `yolo.py` | YOLOv8 객체 탐지 (선택 — `--yolo` 로 켠다) |
+| `yolo_remote.py` | 원격 객체 탐지 클라이언트 (선택 — `--yolo-remote` 로 켠다) |
 
 ```
 drive.py ──> hardware  (카메라/서보/모터, 또는 replay)
@@ -124,6 +125,8 @@ drive.py ──> hardware  (카메라/서보/모터, 또는 replay)
 | `drive.py` | 차선 자율주행 (AUTO/MANUAL/STOP). 탐지는 숫자로만 | 5000 |
 | `collect.py` | 수동 주행 + N프레임마다 프레임 저장 (학습 데이터 수집) | 5001 |
 | `watch.py` | 수동 주행 + 카메라 원본 화면에 탐지 박스 표시 | 5002 |
+
+**맥에서 실행**: `yolo_server.py` — Pi 대신 YOLO 추론만 해 주는 서버 (포트 5010).
 
 `collect.py` 와 `watch.py` 는 **차선 인지를 전혀 돌리지 않는다** — BEV·이진화·
 슬라이딩 윈도우·Pure Pursuit 이 빠져서 그만큼 가볍다.
@@ -147,6 +150,7 @@ python3 watch.py --detect-every 3 --imgsz 448    # 영상을 부드럽게
 | `calibrate_metric.py` | BEV 픽셀 <-> cm 환산 캘리브레이션 |
 | `tune_src.py` | 폭-기울기 지표로 `SRC_POINTS` 최적화 (**아래 2번 항목 반드시 읽을 것**) |
 | `test_control.py` | Pure Pursuit 기하 단위 테스트 (40개). `python3 test_control.py` |
+| `bench_link.py` | 원격 추론 링크 왕복 지연 측정 (대회 전 현장에서 돌린다) |
 
 ## 사용법
 
@@ -351,14 +355,14 @@ Mac 기준 프레임당 `warp 0.55ms + adaptive 0.50ms + sliding 1.32ms = 약 2.
 
 ### 객체 탐지 (`yolo.py`) — 선택
 
-`object_detection/best_v3.pt` (직접 학습한 YOLOv8n, 7클래스 `car_red /
+`object_detection/best_v6.pt` (직접 학습한 YOLOv8n, 7클래스 `car_red /
 car_white / human / left / red / right / right_sign`)로 프레임 안의 객체를
 탐지해 **상태표의 OBJECTS 행에만 표시한다.** 주행 제어에는 관여하지 않고
 화면에 박스도 그리지 않는다.
 
 ```bash
 python3 drive.py --yolo                          # 매 15프레임마다 추론
-python3 drive.py --yolo --yolo-every 30 --model ../object_detection/best_v3.pt
+python3 drive.py --yolo --yolo-every 30 --model ../object_detection/best_v6.pt
 ```
 
 **기본은 꺼짐이다.** `--yolo` 를 주지 않으면 `ultralytics` 를 import 조차 하지
@@ -370,15 +374,16 @@ python3 drive.py --yolo --yolo-every 30 --model ../object_detection/best_v3.pt
 0.781(conf>0.7 이 74%)이지만, 채널을 뒤집으면 0.516(28%)으로 떨어진다.
 `raspi/L_7_YOLO.py` 는 스왑을 안 하는데 그건 다른 모델 기준이라 따라가면 안 된다.
 
-**런타임을 NCNN 으로 바꾸면 정확도 손실 없이 빨라진다** (맥 CPU, obstacles 150장):
+**런타임을 NCNN 으로 바꾸면 정확도 손실 없이 빨라진다** (기존 best_v3 기준,
+맥 CPU, obstacles 150장):
 
 | 런타임 | imgsz | 평균 | 배속 | 검출 수 |
 |---|---|---|---|---|
 | PyTorch `.pt` | 640 | 33.5 ms | 1.00x | 117 |
-| **NCNN (현재 기본값)** | 640 | **15.3 ms** | **2.19x** | **119** |
+| **NCNN** | 640 | **15.3 ms** | **2.19x** | **119** |
 | ONNX Runtime | 640 | 38.3 ms | 0.86x | 117 |
 
-ONNX 는 오히려 느렸다. 만드는 법은 `yolo export model=best_v3.pt format=ncnn imgsz=640`
+ONNX 는 오히려 느렸다. 만드는 법은 `yolo export model=<model>.pt format=ncnn imgsz=640`
 이며, **NCNN 모델은 내보낼 때 imgsz 가 고정되어 `--imgsz` 로 못 바꾼다.**
 
 `imgsz` 를 낮추면 더 빨라지는 대신 **탐지를 잃는다** (150장, 640 결과 기준):
@@ -399,6 +404,103 @@ ONNX 는 오히려 느렸다. 만드는 법은 `yolo export model=best_v3.pt for
 별도 스레드로 옮기면 되고, 그때 바뀌는 곳은 `loop.py` 한 곳뿐이다.
 
 `.pt` 는 `.gitignore` 에 걸려 추적되지 않으므로 **Pi 로 따로 복사해야 한다.**
+
+### 원격 객체 탐지 (`yolo_server.py` + `yolo_remote.py`)
+
+**Pi4 로컬 추론이 느려서, 프레임을 맥으로 보내 거기서 추론하고 결과만 받는다.**
+
+```bash
+# 맥에서 (먼저 띄운다)
+python3 yolo_server.py --model ../object_detection/best_v6_ncnn_model
+
+# Pi 에서
+python3 drive.py --yolo-remote <맥주소>:5010 --yolo-every 3 --speed 40
+python3 watch.py --yolo-remote <맥주소>:5010
+```
+
+`--yolo` 와 `--yolo-remote` 는 **함께 쓸 수 없다** — 로컬 추론이냐 원격 추론이냐를
+고르는 것이다. 원격일 때 **Pi 에는 `ultralytics` 도 모델 파일도 필요 없다**
+(`requests` 만 있으면 된다). 서버는 `.pt` 와 NCNN 폴더를 둘 다 받는다.
+
+`RemoteDetector` 는 `yolo.Detector` 와 **같은 표면**(`infer`/`summary`/`counts`/
+`boxes`/`total`/`runs`/`names`)을 가진다. 그래서 `loop.py` 의 `Worker(det.infer, ...)`
+구성이 그대로 돌아가고, 원격이냐 로컬이냐를 아는 곳은 `drive.py` 의 조립부뿐이다.
+전송 방식을 바꾸게 되면 바뀌는 곳은 `yolo_remote.py` 한 파일이다.
+
+#### 대역폭이 아니라 지연이 문제다
+
+전송용 JPEG 품질별 측정 (obstacles 210장, 무손실 재인코딩 대비):
+
+| 품질 | 평균 크기 | 검출 수 | 클래스 집합 일치 |
+|---|---|---|---|
+| 95 | 87.2 KB | 100% | 97% |
+| **85 (기본값)** | **46.4 KB** | **101%** | **97%** |
+| 75 | 33.9 KB | 99% | 94% |
+| 65 | 27.8 KB | 97% | 94% |
+| 50 | 22.4 KB | 98% | 93% |
+| 35 | 18.4 KB | 97% | 87% |
+
+초당 15회 보내도 5Mbps 수준이라 **대역폭은 병목이 아니다.** 최적화 대상은
+전송량이 아니라 왕복 지연의 흔들림이다. Pi4 의 JPEG 인코딩 시간이 문제가 되면
+그때 `--yolo-jpeg-quality 75` 로 낮춘다 — 검출 손실은 1%다.
+
+부수효과로 **추론 주기를 올릴 수 있다.** Pi CPU 를 안 쓰므로 `--yolo-every` 를
+줄여도 제어 루프가 굶지 않는다. 좌/우 화살표 판정이 프레임마다 뒤집히는 문제
+(`left`/`right` 가 같은 박스에 IoU 0.92~0.98로 동시에 붙는 프레임이 25장, conf 차이
+중앙값 0.19)에는 표본 수가 곧 정확도라 이게 실질적 이득이다.
+
+#### 네트워크 구성 — 여기가 성패를 가른다
+
+**대회장 공용 WiFi 는 쓰지 않는다.** 다른 팀 장비 수십 대가 붙은 AP 에서는 p50 이
+5ms 여도 p99 가 300ms 씩 튀고, 그 한 번이 하필 신호등 앞이면 끝이다. 랜선 직결은
+지연이 결정론적이지만 차가 6.3×3.6m 트랙을 도는 이상 현실성이 없다.
+
+→ **전용 무선 링크**: macOS 인터넷 공유로 맥을 AP 로 만들어 Pi 를 거기에만 붙이거나
+(1홉), 여행용 라우터 하나를 5GHz 고정 채널로 두고 둘만 붙인다.
+
+**대회 전에 트랙 현장에서 반드시 잰다.** `ping` 은 64바이트 패킷이라 40KB 를 보내는
+우리 상황과 숫자가 안 맞는다.
+
+```bash
+python3 tools/bench_link.py --host <맥주소>:5010 -n 1000
+```
+
+왕복을 **맥 추론 / 네트워크**로 나눠 찍으므로 느린 원인을 구분할 수 있다.
+**p99 가 200ms 를 넘으면 이 방식은 위험하다** — 전송 방식(생 TCP, ZeroMQ)을 손대기
+전에 네트워크 구성부터 의심할 것.
+
+#### 링크가 끊기면 선다
+
+유효한 탐지 결과가 `--yolo-watchdog-ms`(기본 2000) 이상 없으면 모터를 세운다.
+`loop.py` 가 매 프레임 `det.link['ok']` 를 보고 `Driver.link_halt` 를 세우는 방식이라,
+기존 `MAX_FAIL_FRAMES` 정지와 같은 자리에서 같은 철학으로 동작한다. 0 이면 끈다.
+
+**임계는 추론 시도 간격보다 충분히 커야 한다.** `--yolo-every 15` 에 17fps 면 시도
+간격이 이미 0.9초라, 임계를 1000ms 로 잡으면 정상 주행 중에도 깜빡인다. 값이
+위험하면 실행할 때 경고가 뜬다. 원격 모드는 Pi CPU 를 안 쓰므로 `--yolo-every` 를
+낮추는 쪽이 맞다.
+
+왕복이 실패해도 **예외는 밖으로 나가지 않는다** — `misses` 만 오르고 직전 결과가
+유지된다. 서버를 다시 띄우면 `requests.Session` 이 알아서 새 연결을 연다.
+시작할 때는 `/health` 로 서버를 확인하고, 실패하면 gpio/카메라를 건드리기 전에 끝낸다.
+
+웹 대시보드 상태표의 **LINK** 행에 `OK rtt 27ms  age 310ms  miss 0` 형태로 나온다.
+
+> **"객체가 없다"와 "결과를 못 받았다"는 다르다.** `summary` 만 보면 둘이 구분되지
+> 않는다 — 링크가 끊긴 순간을 "빨간불 없음"으로 읽으면 신호를 무시한 채 교차로에
+> 들어간다. 나중에 미션 상태기계를 붙일 때 반드시 `link['ok']` 를 함께 봐야 한다.
+
+#### 채널 스왑 — 양쪽 어디에도 넣지 말 것
+
+`Afb1Hardware.read()` 가 이미 `BGR2RGB` 한 프레임을 그대로 `imencode` 하면 맥에서
+`imdecode` 했을 때 채널 순서가 보존된다. 서버에서 습관적으로 색변환을 넣으면 위
+`yolo.py` 절의 그 함정(평균 conf 0.781 → 0.516)에 그대로 빠진다. 로컬 추론과
+원격 추론의 요약 문자열을 150장으로 비교하면 **97% 일치**하는데(품질 85 재인코딩의
+상한과 같다), 이 값이 크게 낮아졌다면 어딘가에 색변환이 낀 것이다.
+
+**대회규정 제9조 확인 필요** — "라즈베리파이 외 타 보드는 사용이 불가하다",
+"사용한 보드 및 센서는 모두 운영위원회에게 자료를 제출받고, 허가를 받아야 한다".
+맥북 추론이 허용되는지 운영위에 먼저 확인할 것.
 
 ## 라벨링 (`label_gt.py`)
 

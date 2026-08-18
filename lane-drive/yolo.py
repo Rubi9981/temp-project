@@ -6,7 +6,7 @@
     det.infer(frame)        # -> 'human 1, red 1'
     det.summary             # 마지막 추론 결과 (추론을 건너뛴 프레임에서도 유지)
 
-**입력 프레임을 채널 변환하지 말 것.** best_v3.pt 는 Afb1Hardware.read() 가
+**입력 프레임을 채널 변환하지 말 것.** 현재 모델은 Afb1Hardware.read() 가
 COLOR_BGR2RGB 스왑을 한 뒤 저장된 프레임(collect.py 산출물)으로 학습됐다.
 obstacles/ 1046장으로 확인한 결과, 주행 루프의 frame 을 그대로 넣었을 때
 평균 conf 0.781 / conf>0.7 이 74% 인 반면 채널을 뒤집으면 0.516 / 28% 로 떨어진다.
@@ -50,7 +50,7 @@ class Detector:
                     f'NCNN 모델 폴더에 {" 와 ".join(missing)} 파일이 없습니다: {model_path}\n'
                     f'  현재 내용: {", ".join(sorted(os.listdir(model_path))) or "(비어 있음)"}\n'
                     '  model.ncnn.param 과 model.ncnn.bin 을 함께 복사해야 합니다.\n'
-                    '  다시 만들려면: yolo export model=best_v3.pt format=ncnn imgsz=640'
+                    '  다시 만들려면: yolo export model=<model>.pt format=ncnn imgsz=640'
                 )
         try:
             from ultralytics import YOLO

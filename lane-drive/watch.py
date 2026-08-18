@@ -108,7 +108,7 @@ class Shared:
         self.jpeg = None
         self.running = True
         self.tel = {'detect': True, 'objects': '-', 'fps': 0.0, 'frames': 0,
-                    'servo': cfg.SERVO_CENTER, 'motor': 0}
+                    'servo': cfg.SERVO_CENTER, 'motor': 0, 'link': '-'}
 
 
 # ==============================================================================
@@ -146,6 +146,7 @@ PAGE = """
       <tr><td>FRAMES</td><td id="frames">-</td></tr>
       <tr><td>SERVO</td><td id="servo">-</td></tr>
       <tr><td>MOTOR</td><td id="motor">-</td></tr>
+      <tr><td>LINK</td><td id="link">-</td></tr>
     </table>
     <div>
       <button class="det" id="b_det" onclick="toggleDet()">DETECT</button>
@@ -200,7 +201,7 @@ addEventListener('blur',()=>{for(const k of held)keyUp(k); held.clear();});
 
 setInterval(async()=>{
   const r=await fetch('/api/status'); const s=await r.json();
-  for(const k of ['objects','frames','servo','motor'])
+  for(const k of ['objects','frames','servo','motor','link'])
     document.getElementById(k).textContent=s[k];
   document.getElementById('fps').textContent=s.fps.toFixed(1);
   document.getElementById('detect').textContent=s.detect?'켜짐':'꺼짐';
@@ -324,7 +325,8 @@ def run_loop(hw, man, det, shared, args, prof=None):
                 shared.tel = {'detect': man.detecting,
                               'objects': det.summary if man.detecting else '-',
                               'fps': fps, 'frames': frames,
-                              'servo': man.servo_cmd, 'motor': man.motor_cmd}
+                              'servo': man.servo_cmd, 'motor': man.motor_cmd,
+                              'link': getattr(det, 'link_str', '-')}
 
             if args.log_every and frames - last_log >= args.log_every:
                 last_log = frames
@@ -364,6 +366,14 @@ def main():
     ap.add_argument('--imgsz', type=int, default=cfg.YOLO_IMGSZ,
                     help='추론 입력 크기. 낮추면 빠르지만 탐지를 잃는다 '
                          '(448=90%%, 320=73%%)')
+    # 원격 추론 — Pi4 로컬 YOLO 가 느려서 맥에 맡긴다. 상대편은 yolo_server.py.
+    ap.add_argument('--yolo-remote', metavar='HOST[:PORT]',
+                    help='맥의 추론 서버로 프레임을 보내 원격 추론한다. '
+                         '이때 Pi 에는 ultralytics 도 모델 파일도 필요 없다')
+    ap.add_argument('--yolo-jpeg-quality', type=int, default=cfg.YOLO_JPEG_QUALITY,
+                    help=f'전송용 JPEG 품질 (기본 {cfg.YOLO_JPEG_QUALITY})')
+    ap.add_argument('--yolo-timeout', type=float, default=cfg.YOLO_TIMEOUT_S,
+                    help=f'왕복 최대 대기 시간(초, 기본 {cfg.YOLO_TIMEOUT_S})')
     ap.add_argument('--speed', type=int, default=cfg.DRIVE_SPEED,
                     help=f'전진/후진 모터 속도 (기본 {cfg.DRIVE_SPEED})')
     ap.add_argument('--port', type=int, default=5002,
@@ -379,9 +389,15 @@ def main():
 
     # 하드웨어보다 먼저 만든다. 모델이나 ultralytics 가 없으면 gpio/카메라를
     # 건드리기 전에 끝내야 정리 없이 죽는 일이 없다.
-    det = yolo.Detector(args.model, args.conf, args.imgsz)
-    print(f'[yolo] {args.model} imgsz={args.imgsz} conf={args.conf} '
-          f'클래스 {len(det.names)}종: {", ".join(det.names.values())}')
+    if args.yolo_remote:
+        import yolo_remote
+        # 워치독은 주지 않는다 — watch.py 는 수동 주행이라 자동으로 세울 것이 없다
+        det = yolo_remote.RemoteDetector(args.yolo_remote, args.yolo_jpeg_quality,
+                                         args.yolo_timeout, watchdog_ms=0)
+    else:
+        det = yolo.Detector(args.model, args.conf, args.imgsz)
+        print(f'[yolo] {args.model} imgsz={args.imgsz} conf={args.conf}')
+    print(f'[yolo] 클래스 {len(det.names)}종: {", ".join(det.names.values())}')
 
     if args.replay:
         hw = hardware.ReplayHardware(args.replay, loop=args.replay_loop)
