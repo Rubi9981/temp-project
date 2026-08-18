@@ -26,6 +26,11 @@
 
 # yolo 모델 가중치
 !best_v3.pt
+# NCNN 내보내기 결과. 폴더 이름은 모델마다 달라져도 안쪽 파일명은
+# 항상 model.ncnn.* 이다. 이 예외가 없으면 폴더는 받아지는데 알맹이가
+# 빠져서, ultralytics 가 .param 을 못 찾고 StopIteration 으로 죽는다.
+!model.ncnn.param
+!model.ncnn.bin
 
 # 가상환경/캐시 안의 .py는 위 규칙보다 우선해서 제외
 .venv/

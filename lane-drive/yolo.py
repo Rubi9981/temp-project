@@ -35,10 +35,23 @@ class Detector:
     def __init__(self, model_path, conf, imgsz):
         if not os.path.exists(model_path):
             raise SystemExit(
-                f'모델 파일이 없습니다: {model_path}\n'
-                '  .pt 는 git 에 없으므로 Pi 로 따로 복사해야 합니다.\n'
-                '  경로를 직접 주려면: --yolo-model <경로>'
+                f'모델을 찾을 수 없습니다: {model_path}\n'
+                '  경로를 직접 주려면: --model <경로>'
             )
+        # NCNN 내보내기는 파일이 아니라 폴더다. 폴더만 있고 알맹이가 빠진
+        # 경우를 여기서 잡는다 — 안 그러면 ultralytics 안쪽에서
+        # next(w.glob("*.param")) 이 StopIteration 으로 죽어 원인이 안 보인다.
+        # 실제로 .param/.bin 이 .gitignore 에 걸려 Pi 로 안 옮겨간 적이 있다.
+        if os.path.isdir(model_path):
+            missing = [ext for ext in ('.param', '.bin')
+                       if not any(f.endswith(ext) for f in os.listdir(model_path))]
+            if missing:
+                raise SystemExit(
+                    f'NCNN 모델 폴더에 {" 와 ".join(missing)} 파일이 없습니다: {model_path}\n'
+                    f'  현재 내용: {", ".join(sorted(os.listdir(model_path))) or "(비어 있음)"}\n'
+                    '  model.ncnn.param 과 model.ncnn.bin 을 함께 복사해야 합니다.\n'
+                    '  다시 만들려면: yolo export model=best_v3.pt format=ncnn imgsz=640'
+                )
         try:
             from ultralytics import YOLO
         except ImportError as exc:
