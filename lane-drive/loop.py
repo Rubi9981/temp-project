@@ -230,7 +230,10 @@ def run_loop(hw, driver, shared, args, prof=None, det=None):
 
             tel = {'mode': driver.mode, 'fps': fps_inst, 'fps_avg': fps_avg,
                    'servo': int(round(driver.servo_cmd)), 'motor': driver.motor_cmd,
-                   'status': 'OK' if ctrl.ok else 'NO LANE',
+                   # CrossroadDriver 는 sub_state 로 더 자세히 알려준다
+                   'status': getattr(driver, 'sub_state', None)
+                             or ('OK' if ctrl.ok else 'NO LANE'),
+                   'sub_state': getattr(driver, 'sub_state', ''),
                    'halted': driver.stopped, 'frames': n,
                    'objects': det.summary if det is not None else '-',
                    'link': getattr(det, 'link_str', '-') if det is not None else '-'}
@@ -307,6 +310,8 @@ def print_summary(driver, hw, elapsed):
     if s['frames']:
         print(f"  조향 산출 {s['ok']} ({100 * s['ok'] / s['frames']:.0f}%)  "
               f"실패 {s['fail']} ({100 * s['fail'] / s['frames']:.0f}%)")
+    if 'crossroad' in s:        # CrossroadDriver 일 때만
+        print(f"  교차로 직진 {s['crossroad']}  객체 정지 {s['object_stop']}")
     print(f"  연속 실패로 정지한 횟수: {s['halt']}")
     print('=' * 52)
 

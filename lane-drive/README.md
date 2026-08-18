@@ -100,12 +100,13 @@ python3 drive.py --replay ../project/captures --no-web   # 3) 주행 로직 통�
 |---|---|
 | `drive.py` | **진입점.** 명령행 인자 파싱과 조립만 한다 |
 | `hardware.py` | 하드웨어 추상화 — `Afb1Hardware`(실차) / `ReplayHardware`(저장 이미지) |
-| `driver.py` | 주행 상태 기계 — 한 프레임 처리 + AUTO/MANUAL/STOP |
+| `driver.py` | 주행 상태 기계 — `perceive()` 인지 + AUTO/MANUAL/STOP |
 | `loop.py` | 주행 루프, 스레드 간 공유 상태, 단계별 소요시간 프로파일러 |
 | `hud.py` | 화면 위에 검출/제어 상태 그리기 |
 | `webui.py` | Flask 웹 디버그 대시보드 (HTML 인라인) |
 | `yolo.py` | YOLOv8 객체 탐지 (선택 — `--yolo` 로 켠다) |
 | `yolo_remote.py` | 원격 객체 탐지 클라이언트 (선택 — `--yolo-remote` 로 켠다) |
+| `crossroad_driver.py` | 교차로 직진 상태 기계 (선택 — `--crossroad` 로 켠다) |
 
 ```
 drive.py ──> hardware  (카메라/서보/모터, 또는 replay)
@@ -122,7 +123,7 @@ drive.py ──> hardware  (카메라/서보/모터, 또는 replay)
 
 | 파일 | 하는 일 | 포트 |
 |---|---|---|
-| `drive.py` | 차선 자율주행 (AUTO/MANUAL/STOP). 탐지는 숫자로만 | 5000 |
+| `drive.py` | 차선 자율주행 (AUTO/MANUAL/STOP). `--crossroad` 로 교차로 통과 | 5000 |
 | `collect.py` | 수동 주행 + N프레임마다 프레임 저장 (학습 데이터 수집) | 5001 |
 | `watch.py` | 수동 주행 + 카메라 원본 화면에 탐지 박스 표시 | 5002 |
 
@@ -361,12 +362,16 @@ car_white / human / left / red / right / right_sign`)로 프레임 안의 객체
 화면에 박스도 그리지 않는다.
 
 ```bash
-python3 drive.py --yolo                          # 매 15프레임마다 추론
-python3 drive.py --yolo --yolo-every 30 --model ../object_detection/best_v6.pt
+python3 drive.py --yolo                          # 로컬 추론으로 강제
+python3 drive.py --yolo --yolo-every 15 --model ../object_detection/best_v6.pt
 ```
 
-**기본은 꺼짐이다.** `--yolo` 를 주지 않으면 `ultralytics` 를 import 조차 하지
-않으므로, 미설치 환경에서도 주행은 그대로 돌아간다.
+**기본은 원격 추론이다** (아래 절). `--yolo` 는 그걸 로컬로 되돌리는 스위치이고,
+`--no-yolo` 를 주면 탐지를 통째로 끈다. `--yolo` 를 주지 않으면 `ultralytics` 를
+import 조차 하지 않으므로, 미설치 환경에서도 주행은 그대로 돌아간다.
+
+**로컬로 되돌릴 때는 `--yolo-every` 를 15 쯤으로 올릴 것.** 기본값 3 은 원격
+기준이라, Pi4 에서 매 3프레임 추론은 코어를 계속 물고 있게 된다.
 
 **프레임을 채널 변환하지 말 것.** 이 모델은 `Afb1Hardware.read()` 가
 `COLOR_BGR2RGB` 스왑을 한 뒤 저장된 프레임(`collect.py` 산출물)으로 학습됐다.
@@ -409,18 +414,41 @@ ONNX 는 오히려 느렸다. 만드는 법은 `yolo export model=<model>.pt for
 
 **Pi4 로컬 추론이 느려서, 프레임을 맥으로 보내 거기서 추론하고 결과만 받는다.**
 
+**이것이 기본 동작이다.** `drive.py` 를 인자 없이 실행하면 `config.py` 의
+`YOLO_REMOTE_DEFAULT` 로 붙는다.
+
 ```bash
 # 맥에서 (먼저 띄운다)
 python3 yolo_server.py --model ../object_detection/best_v6_ncnn_model
 
-# Pi 에서
-python3 drive.py --yolo-remote <맥주소>:5010 --yolo-every 3 --speed 40
-python3 watch.py --yolo-remote <맥주소>:5010
+# Pi 에서 — 이것만으로 원격 추론 + 교차로 통과가 켜진다
+python3 drive.py --speed 40
+
+python3 drive.py --yolo-remote 192.168.0.7:5010   # 맥 주소가 바뀌었을 때
+python3 watch.py --yolo-remote <맥주소>:5010       # watch.py 는 아직 명시해야 한다
 ```
 
-`--yolo` 와 `--yolo-remote` 는 **함께 쓸 수 없다** — 로컬 추론이냐 원격 추론이냐를
-고르는 것이다. 원격일 때 **Pi 에는 `ultralytics` 도 모델 파일도 필요 없다**
-(`requests` 만 있으면 된다). 서버는 `.pt` 와 NCNN 폴더를 둘 다 받는다.
+기본 주소는 `config.py` 한 곳에 있다. **맥 주소가 바뀌면 이 줄만 고치면 된다:**
+
+```python
+YOLO_REMOTE_HOST = '100.124.14.110'
+YOLO_REMOTE_PORT = 5010
+```
+
+| 스위치 | 결과 |
+|---|---|
+| (없음) | 원격 추론 — `YOLO_REMOTE_DEFAULT` 로 접속 |
+| `--yolo-remote HOST[:PORT]` | 주소만 바꿔서 원격 추론 |
+| `--yolo` | 로컬 추론으로 되돌린다 (`--yolo-every` 를 올릴 것) |
+| `--no-yolo` | 탐지를 완전히 끈다. **서버 없이 돌릴 때 이것** |
+
+`--yolo` 와 `--yolo-remote` 는 **함께 쓸 수 없다.** 원격일 때 **Pi 에는
+`ultralytics` 도 모델 파일도 필요 없다** (`requests` 만 있으면 된다). 서버는
+`.pt` 와 NCNN 폴더를 둘 다 받는다.
+
+> **서버가 떠 있지 않으면 `drive.py` 가 시작하지 않는다.** `/health` 확인에
+> 실패하면 gpio/카메라를 건드리기 전에 끝낸다. 맥 없이 차선 추종만 보려면
+> `--no-yolo` 를 준다.
 
 `RemoteDetector` 는 `yolo.Detector` 와 **같은 표면**(`infer`/`summary`/`counts`/
 `boxes`/`total`/`runs`/`names`)을 가진다. 그래서 `loop.py` 의 `Worker(det.infer, ...)`
@@ -501,6 +529,54 @@ python3 tools/bench_link.py --host <맥주소>:5010 -n 1000
 **대회규정 제9조 확인 필요** — "라즈베리파이 외 타 보드는 사용이 불가하다",
 "사용한 보드 및 센서는 모두 운영위원회에게 자료를 제출받고, 허가를 받아야 한다".
 맥북 추론이 허용되는지 운영위에 먼저 확인할 것.
+
+### 교차로 통과 (`crossroad_driver.py`) — 선택
+
+차선이 끊긴 구간을 **서보 중립으로 천천히 직진**해 빠져나간다. **기본으로 켜져 있고,**
+`--no-crossroad` 를 주면 기존 `Driver` 로 차선 추종만 한다.
+
+```bash
+python3 drive.py --speed 40                  # 교차로 통과 포함 (기본)
+python3 drive.py --speed 40 --cross-speed 40 # 교차로 직진 속도만 조정
+python3 drive.py --no-crossroad              # 끄고 차선 추종만
+```
+
+`CrossroadDriver` 는 **`Driver` 를 상속한다.** 인지(`perceive()`)와 하드웨어 출력
+(`apply_servo`/`apply_motor`/`set_mode`/`hw_lock`)은 부모 것을 그대로 쓰고 `step()` 의
+판단만 바꾼다. 그래서 `loop.run_loop` 이 둘을 구분하지 않고 돌리며, 원격 탐지
+워치독(`link_halt`)도 자동으로 따라온다.
+
+AUTO 모드에서의 판단 순서:
+
+| 순서 | 조건 | 동작 | sub_state |
+|---|---|---|---|
+| 1 | 원격 탐지 링크 끊김 | 정지 | `LINK_LOST` |
+| 2 | `red`/`human`/`car_red`/`car_white` 탐지 | 정지 + 서보 중립 | `STOP_<클래스>` |
+| 3 | `ctrl.ok` | Pure Pursuit (`--speed`) | `LANE_FOLLOW` |
+| 4 | 차선 없음 + 대상 객체 없음 | 직진 (`--cross-speed`) | `CROSSROAD_STRAIGHT` |
+| 5 | 차선 없음 + 대상 객체 있음 | 기존 실패 처리 | `HOLD_n` / `FAIL_SAFE` |
+
+4번이 `CROSSROAD_MAX_FRAMES`(120, 30fps 기준 약 4초)를 넘으면 세운다 —
+그만큼 직진했는데 차선이 안 잡히면 교차로가 아니었던 것이다.
+
+`sub_state` 는 웹 상태표의 STATUS 행과 HUD 좌상단 **STATE** 줄에 그대로 나온다.
+
+**`--no-yolo` 로 탐지를 끄면 객체 판단이 통째로 빠져 "차선 없으면 직진"만
+남는다.** 실행할 때 경고가 뜬다.
+
+#### 알고 쓸 것 두 가지
+
+**4번의 진입 조건이 "차선이 안 보임"이다.** 차선 실종은 교차로·급커브·반사광을
+구분하지 못한다. `obstacles/` 1046장(교차로가 **없는** 데이터)으로 replay 하면
+88프레임이 `CROSSROAD_STRAIGHT` 로 분류되는데, 이 88은 같은 데이터의 차선 검출
+실패 수와 정확히 같다 — **검출 실패 전부가 교차로로 오인된다.** 실차에서는
+급커브에서 `servo 90 + 저속 직진`이 되므로 이탈 위험이 있다. 정지선 검출과
+표지판 래치가 들어가면 진입 조건을 그쪽으로 옮겨야 한다.
+
+**2번에 거리 게이트가 없다.** 화면 어디에 얼마나 멀리 있든 잡히기만 하면 선다.
+같은 replay 에서 1046장 중 584장(56%)이 여기 걸렸다. 규정상 정적 장애물(`car_*`)은
+**회피** 대상이지 정지 대상이 아니므로, 실주행 튜닝 때 bbox 면적 임계를 넣거나
+`cfg.CROSSROAD_STOP_CLASSES` 에서 빼는 것을 먼저 검토할 것.
 
 ## 라벨링 (`label_gt.py`)
 

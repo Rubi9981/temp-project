@@ -55,6 +55,12 @@ def overlay(roi, y_start, res, ctrl, tel):
         (f"SERVO: {tel['servo']}", (200, 200, 200)),
         (f"MOTOR: {tel['motor']}", (200, 200, 200)),
     ]
+    # 교차로 주행일 때만 붙는다 (CrossroadDriver 의 하위 상태)
+    if tel.get('sub_state'):
+        sub = tel['sub_state']
+        color = ((0, 0, 255) if 'STOP' in sub or 'LOST' in sub or 'FAIL' in sub
+                 else (0, 255, 0) if sub == 'LANE_FOLLOW' else (0, 165, 255))
+        rows.insert(1, (f'STATE: {sub}', color))
     for i, (text, color) in enumerate(rows):
         y = 28 + i * 26
         cv2.putText(vis, text, (14, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)

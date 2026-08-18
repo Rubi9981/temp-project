@@ -84,19 +84,25 @@ class Driver:
             self.apply_servo(cfg.SERVO_CENTER)
         return True
 
-    def step(self, frame):
-        """한 프레임 처리. (ctrl, roi, res, y_start) 를 돌려준다.
+    def perceive(self, frame):
+        """인지만 한다 — warp -> 이진화 -> 검출 -> Pure Pursuit.
+
+        조향/구동 판단과 분리해 둔 것은 CrossroadDriver 가 이 부분을 그대로
+        쓰고 판단만 바꿔 끼우기 때문이다 (crossroad_driver.py).
 
         두 번째 반환값은 **ROI 밴드**다 (예전에는 전체 BEV 였다). 화면에 그릴
         때도 이것을 쓴다 — 분석하지 않는 위쪽 55%는 애초에 만들지 않는다.
         """
-        self.stats['frames'] += 1
-
         roi = cv2.warpPerspective(frame, self.roi_matrix, (cfg.W, self.roi_h))
-        y_start = self.y_start
         mask = self.bin_fn(roi)
         res = self.det_fn(mask)
-        ctrl = self.pp(res, roi.shape[0], y_start)
+        ctrl = self.pp(res, roi.shape[0], self.y_start)
+        return ctrl, roi, res, self.y_start
+
+    def step(self, frame):
+        """한 프레임 처리. (ctrl, roi, res, y_start) 를 돌려준다."""
+        self.stats['frames'] += 1
+        ctrl, roi, res, y_start = self.perceive(frame)
 
         if self.mode == 'STOP':
             # 인지는 계속 돌린다 — 화면은 살아 있어야 상태를 볼 수 있다
