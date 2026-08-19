@@ -320,7 +320,13 @@ def print_summary(driver, hw, elapsed):
         print(f"  조향 산출 {s['ok']} ({100 * s['ok'] / s['frames']:.0f}%)  "
               f"실패 {s['fail']} ({100 * s['fail'] / s['frames']:.0f}%)")
     if 'crossroad' in s:        # CrossroadDriver 일 때만
-        print(f"  교차로 직진 {s['crossroad']}  객체 정지 {s['object_stop']}")
+        line = f"  교차로 직진 {s['crossroad']}  객체 정지 {s['object_stop']}"
+        if s.get('stale'):
+            # 탐지가 묵어 판단을 보류한 프레임 수. 많으면 링크가 나쁘다는 뜻이라
+            # --yolo-timeout / 네트워크 구성을 손봐야 한다.
+            line += (f"  탐지 묵음 {s['stale']}"
+                     f" ({100 * s['stale'] / max(s['frames'], 1):.0f}%)")
+        print(line)
     print(f"  연속 실패로 정지한 횟수: {s['halt']}")
     print('=' * 52)
 

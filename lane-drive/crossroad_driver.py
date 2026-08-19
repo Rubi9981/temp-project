@@ -91,8 +91,11 @@ class CrossroadDriver(Driver):
                 # 시작하는 시점이 이미 타임아웃을 넘으면 그 방향은 매번 정지한다.
                 print(f'[경고] {side} 회전: TURN_TIMEOUT({to}) <= TURN_MIN({mn}) 이라 '
                       '항상 타임아웃으로 끝납니다.')
+        # 감속 배율은 들고 있는다 — 탐지가 묵은 프레임에서 속도를 도로 올리지
+        # 않기 위해서다. 묵으면 직전 값을 그대로 쓴다.
+        self.slow = 1.0
         self.stats.update({'lane_follow': 0, 'crossroad': 0, 'object_stop': 0,
-                           'turn': 0})
+                           'turn': 0, 'stale': 0})
 
     def _set_state(self, name, reason=''):
         """판단 결과를 기록한다. 이름이 바뀔 때만 이력에 남긴다.
@@ -193,8 +196,21 @@ class CrossroadDriver(Driver):
     # 자동 반응 (--slow-on-sight / --red-stop / --auto-turn)
     # -----------------------------
     def _areas(self):
-        """지금 보이는 것들의 {클래스: (면적, conf)}. 면적이 곧 거리 대용이다."""
-        return yolo.largest_area_by_class(getattr(self.det, 'boxes', None))
+        """(지금 보이는 것들의 {클래스: (면적, conf)}, 신선한가) 를 돌려준다.
+
+        **"묵었다"를 "아무것도 안 보인다"로 뭉개면 안 된다.** 빈 목록으로
+        돌려주면 감속이 풀리고, 사라짐으로 판정하는 로직이 거짓 발동한다.
+        그래서 areas 는 그대로 주고 fresh 로 따로 알린다 — 호출부는 묵었을 때
+        **새 행동을 시작하지 않되 하던 것은 유지**한다.
+
+        로컬 추론(yolo.Detector)에는 link 가 없어 age 0 으로 취급된다. 동기로
+        돌아 방금 프레임의 결과이므로 맞다.
+        """
+        link = getattr(self.det, 'link', None) or {}
+        fresh = link.get('age_ms', 0.0) <= cfg.DETECTION_MAX_AGE_MS
+        if not fresh:
+            self.stats['stale'] += 1
+        return yolo.largest_area_by_class(getattr(self.det, 'boxes', None)), fresh
 
     def _slow_factor(self, areas):
         """SLOW_CLASSES 중 하나라도 **보이면** SLOW_FACTOR. 면적은 보지 않는다."""
@@ -332,13 +348,16 @@ class CrossroadDriver(Driver):
             return ctrl, roi, res, y_start
 
         # 자동 반응 세 가지가 모두 꺼져 있으면 면적 계산 자체를 건너뛴다.
-        areas = (self._areas()
-                 if (self.auto_turn or self.red_stop or self.slow_on_sight) else {})
+        areas, fresh = (self._areas()
+                        if (self.auto_turn or self.red_stop or self.slow_on_sight)
+                        else ({}, True))
 
         # 자동 회전은 빨간불 정지보다 **먼저** 본다. 그래야 빨간불에 서 있다가
         # 화살표가 뜨는 순간 회전으로 넘어간다 — 정지 상태에서도 매 프레임
         # 여기를 지나기 때문이다.
-        if self.auto_turn:
+        # 묵은 결과로는 **회전을 시작하지 않는다.** 이미 지나간 신호를 보고
+        # 도는 일이 생기기 때문이다. 진행 중인 회전은 위 3번에서 이미 처리됐다.
+        if self.auto_turn and fresh:
             side = self._auto_turn_side(areas)
             if side is not None and self.start_turn(side, auto=True):
                 self._step_turn(res)
@@ -347,11 +366,15 @@ class CrossroadDriver(Driver):
         # 빨간불이 임계 면적을 넘으면 정지하고, 화살표가 나올 때까지 대기한다.
         if self.red_stop:
             red = areas.get('red')
-            if red and red[0] >= self.area_enter.get('red', float('inf')):
+            over = bool(red and red[0] >= self.area_enter.get('red', float('inf')))
+            # 묵었으면 새로 서지는 않는다. 다만 **이미 서 있었다면 계속 선다** —
+            # 묵은 결과를 근거로 출발하는 것이 훨씬 위험하다.
+            if (over and fresh) or (not fresh and self.sub_state == 'STOP_RED'):
                 # 면적은 매 프레임 달라지므로 **이름이 아니라 근거에** 넣는다
-                self._set_state('STOP_RED',
-                                f'면적 {int(red[0])} >= '
-                                f'{int(self.area_enter["red"])} — 방향 신호 대기')
+                why = (f'면적 {int(red[0])} >= {int(self.area_enter["red"])} '
+                       '— 방향 신호 대기' if over and fresh
+                       else '탐지가 묵어 판단 보류 — 정지 유지')
+                self._set_state('STOP_RED', why)
                 self.stats['object_stop'] += 1
                 self.stopped = True
                 self.apply_motor(0)
@@ -360,10 +383,16 @@ class CrossroadDriver(Driver):
 
         if ctrl.ok:
             # 감속은 **차선 추종에만** 건다. 교차로 직진과 회전은 자기 속도가 있다.
-            slow = self._slow_factor(areas) if self.slow_on_sight else 1.0
+            # 묵은 프레임에서는 배율을 갱신하지 않는다 — 묵은 결과를 근거로
+            # 속도를 도로 올리면 안 되기 때문이다.
+            if fresh:
+                self.slow = self._slow_factor(areas)
+            slow = self.slow if self.slow_on_sight else 1.0
             if slow < 1.0:
                 seen = ', '.join(c for c in cfg.SLOW_CLASSES if c in areas)
-                self._set_state('LANE_FOLLOW_SLOW', f'{seen} 보임 — 속도 x{slow:g}')
+                self._set_state('LANE_FOLLOW_SLOW',
+                                (f'{seen} 보임 — 속도 x{slow:g}' if fresh
+                                 else f'탐지 묵음 — 직전 배율 x{slow:g} 유지'))
             else:
                 self._set_state('LANE_FOLLOW', '차선 추종')
             self.stats['lane_follow'] += 1
