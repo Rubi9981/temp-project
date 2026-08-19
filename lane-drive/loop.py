@@ -17,6 +17,7 @@ import numpy as np
 import config as cfg
 import hardware
 import hud
+import yolo
 
 
 # ==============================================================================
@@ -247,7 +248,10 @@ def run_loop(hw, driver, shared, args, prof=None, det=None, mission=None):
                              or ('OK' if ctrl.ok else 'NO LANE'),
                    'sub_state': getattr(driver, 'sub_state', ''),
                    'halted': driver.stopped, 'frames': n,
-                   'objects': det.summary if det is not None else '-',
+                   # 요약이 아니라 **면적**을 띄운다 — MISSION_AREA_ENTER 를
+                   # 다시 잴 때 차를 원하는 거리에 놓고 이 숫자를 읽으면 된다.
+                   'objects': (yolo.summary_with_area(det.boxes)
+                               if det is not None else '-'),
                    'link': getattr(det, 'link_str', '-') if det is not None else '-',
                    'mission': mission.status_str if mission is not None else '-'}
 

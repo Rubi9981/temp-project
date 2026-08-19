@@ -53,8 +53,7 @@ def main():
     # JPEG 이 안 눌려 훨씬 커지므로 측정이 비관적으로 나온다.
     path = args.image
     if path is None:
-        cand = sorted(glob.glob(os.path.join(
-            os.path.dirname(cfg.BASE_DIR), 'object_detection', 'obstacles', '*.jpg')))
+        cand = sorted(glob.glob(os.path.join(cfg.OBSTACLES_DIR, '*.jpg')))
         if not cand:
             raise SystemExit('보낼 이미지를 찾지 못했습니다. --image 로 지정하세요.')
         path = cand[len(cand) // 2]

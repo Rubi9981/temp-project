@@ -20,6 +20,11 @@ PROJECT_DIR = os.path.join(os.path.dirname(BASE_DIR), 'project')
 CAPTURES_DIR = os.path.join(PROJECT_DIR, 'captures')          # 원본 (74장)
 CAPTURES_BEV_DIR = os.path.join(PROJECT_DIR, 'captures_bev')  # 기존 BEV 산출물 (68장, stale)
 
+# 주행/탐지 확인용 사진 모음. object_detection/ 아래 있던 것이 여기로 옮겨졌다.
+IMAGES_DIR = os.path.join(os.path.dirname(BASE_DIR), 'images')
+OBSTACLES_DIR = os.path.join(IMAGES_DIR, 'obstacles')            # 1048장
+TRAFFIC_LIGHTS_DIR = os.path.join(IMAGES_DIR, 'traffic_lights')  # 40장
+
 CALIB_PATH = os.path.join(BASE_DIR, 'calib.json')
 GT_PATH = os.path.join(BASE_DIR, 'gt.json')
 
@@ -414,7 +419,7 @@ TURN_SPEED = 40
 # **없으면 회전이 즉시 끝난다.** 차선이 아직 보이는 상태에서 버튼을 누르면
 # 탈출 조건이 첫 프레임부터 만족되어 5프레임(0.17초) 만에 복귀한다. 회전
 # 초반에 가로선을 차선으로 잠깐 오인하는 경우도 같은 방식으로 막힌다.
-# 30fps 기준 0.67초.
+# 30fps 기준 3.3초.
 TURN_MIN_FRAMES = 100
 
 # 양쪽 차선이 이만큼 연속으로 잡히면 회전을 끝내고 차선 추종으로 돌아간다.
@@ -426,3 +431,28 @@ TURN_WIDTH_TOL_PX = 80
 
 # 이만큼 돌았는데도 차선을 못 잡으면 정지 (30fps 기준 4초).
 TURN_TIMEOUT_FRAMES = 120
+
+
+# ==============================================================================
+# 신호등·표지판 자동 반응 (crossroad_driver.py)
+#   --slow-on-sight / --red-stop / --auto-turn 으로 각각 켠다. 기본은 전부 꺼짐.
+# ==============================================================================
+# **면적 임계는 여기에 없다.** 위의 MISSION_AREA_ENTER 를 그대로 읽는다 —
+# 같은 물리량을 두 곳에서 따로 튜닝하면 한쪽만 고쳐도 조용히 어긋난다.
+#     red        -> 이만큼 커지면 정지    (--red-stop)
+#     right_sign -> 이만큼 커지면 우회전  (--auto-turn)
+
+# 이 중 하나라도 **보이기만 하면** 차선 추종 속도를 SLOW_FACTOR 배로 줄인다.
+# 면적을 보지 않는다 — 멀리 보이는 단계에서 미리 느려지는 것이 목적이다.
+SLOW_CLASSES = ['red', 'right_sign']
+SLOW_FACTOR = 0.5
+
+# 방향 신호 클래스 -> 회전 방향. **면적 게이트가 없다** — 잡히는 순간 돈다.
+# 측정상 화살표는 면적 500~1800 에서 이미 conf 0.83~0.94 로 잡히므로 꽤 멀리서도
+# 보인다. 너무 일찍 도는 것이 확인되면 여기에 면적 임계를 붙일 것.
+ARROW_TURN = {'left': 'left', 'right': 'right'}
+
+# 회전이 끝난 뒤 이 프레임 수 동안은 자동 트리거를 무시한다.
+# **없으면 회전이 반복된다** — 다 돌고 나서도 표지판·화살표가 시야에 남아 있으면
+# 곧바로 다시 돌기 때문이다. 웹 버튼 수동 트리거는 이 쿨다운을 무시한다.
+TURN_COOLDOWN_FRAMES = 90

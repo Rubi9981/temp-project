@@ -13,12 +13,20 @@ AUTO 모드에서의 판단 순서:
     1. link_halt          원격 탐지 링크가 끊김            -> 정지
     2. 회전 진행 중       start_turn() 으로 시작됨          -> 고정 조향 원호
     3. 정지 대상 객체     human (CROSSROAD_STOP_CLASSES)    -> 정지
-    4. ctrl.ok            차선 정상                        -> Pure Pursuit (speed)
-    5. 차선 없음 + 객체 없음                               -> 직진 (servo 90, 저속)
-    6. 그 외              차선 없음 + 객체 있음            -> 기존 실패 처리
+    4. 자동 회전 트리거   화살표 / 표지판 면적              -> 회전 시작
+    5. 빨간불 면적 초과   MISSION_AREA_ENTER['red']         -> 정지 후 대기
+    6. ctrl.ok            차선 정상 (감속이 켜져 있으면 x0.5) -> Pure Pursuit
+    7. 차선 없음 + 객체 없음                               -> 직진 (servo 90, 저속)
+    8. 그 외              차선 없음 + 객체 있음            -> 기존 실패 처리
 
-2번이 3번보다 앞인 것은 의도적이다. 정지 대상이 화면에 남아 있어 기동이
-중간에 멈추는 것을 막는다.
+순서에 근거가 있다.
+
+    2번이 3번보다 앞 — 정지 대상이 화면에 남아 기동이 중간에 멈추는 것을 막는다.
+    3번이 4번보다 앞 — 사람이 앞을 막고 있으면 회전을 시작하지 않는다.
+    4번이 5번보다 앞 — 빨간불에 서 있다가 화살표가 뜨면 그때 회전해야 한다.
+
+4·5·6번의 자동 반응은 **기본으로 켜져 있다.** drive.py 의 --no-slow-on-sight /
+--no-red-stop / --no-auto-turn 으로 각각 끈다.
 
 **4번의 진입 조건이 "차선이 안 보임"이라는 점을 알고 써야 한다.** 차선 실종은
 교차로·급커브·반사광을 구분하지 못한다. obstacles/ 1046장(교차로가 없는
@@ -29,6 +37,7 @@ AUTO 모드에서의 판단 순서:
 import math
 
 import config as cfg
+import yolo
 from driver import Driver
 
 
@@ -41,9 +50,17 @@ class CrossroadDriver(Driver):
     """
 
     def __init__(self, *args, det=None, crossroad_speed=None, turn_speed=None,
-                 target_classes=None, stop_classes=None, **kwargs):
+                 target_classes=None, stop_classes=None,
+                 slow_on_sight=True, red_stop=True, auto_turn=True, **kwargs):
         super().__init__(*args, **kwargs)
         self.det = det
+        # 자동 반응 세 가지. **기본으로 켜져 있다** (drive.py 의 --no-* 로 끈다).
+        self.slow_on_sight = slow_on_sight
+        self.red_stop = red_stop
+        self.auto_turn = auto_turn
+        # 면적 임계는 **MISSION_AREA_ENTER 를 그대로 읽는다.** 사용자가 실측해
+        # 넣은 값이고, 별도 상수를 두면 같은 물리량을 두 곳에서 튜닝하게 된다.
+        self.area_enter = dict(cfg.MISSION_AREA_ENTER)
         self.crossroad_speed = (cfg.CROSSROAD_SPEED if crossroad_speed is None
                                 else crossroad_speed)
         self.turn_speed = cfg.TURN_SPEED if turn_speed is None else turn_speed
@@ -55,6 +72,9 @@ class CrossroadDriver(Driver):
         self.turn_side = None           # 'left' | 'right' | None(회전 아님)
         self.turn_start_n = 0
         self.turn_exit_run = 0
+        # 회전이 끝난 프레임. 쿨다운 기준점이다. 시작할 때는 쿨다운이 걸려
+        # 있으면 안 되므로 과거로 밀어 둔다.
+        self.turn_done_n = -cfg.TURN_COOLDOWN_FRAMES
         self.turn_servo = self._turn_servo_table()
         self.stats.update({'lane_follow': 0, 'crossroad': 0, 'object_stop': 0,
                            'turn': 0})
@@ -92,10 +112,12 @@ class CrossroadDriver(Driver):
             self.sub_state = 'LANE_FOLLOW' if mode == 'AUTO' else mode
         return ok
 
-    def start_turn(self, side):
-        """회전 기동 시작. 웹의 TURN L / TURN R 버튼이 부른다.
+    def start_turn(self, side, auto=False):
+        """회전 기동 시작. 웹의 TURN L / TURN R 버튼과 자동 트리거가 부른다.
 
         AUTO 에서만 받는다 — MANUAL 은 방향키가 같은 서보를 만지므로 충돌한다.
+        쿨다운은 자동 트리거(_auto_turn_side) 쪽에서만 본다. **수동 버튼은
+        쿨다운을 무시한다** — 사람이 보고 누른 것이므로 막을 이유가 없다.
         """
         if side not in ('left', 'right') or self.mode != 'AUTO':
             return False
@@ -104,8 +126,39 @@ class CrossroadDriver(Driver):
         self.turn_exit_run = 0
         self.stopped = False
         self.sub_state = f'TURN_{side.upper()}'
-        print(f'  [회전] {side} 시작 — servo {self.turn_servo[side]}')
+        print(f"  [회전] {side} 시작 ({'자동' if auto else '수동'}) — "
+              f'servo {self.turn_servo[side]}')
         return True
+
+    # -----------------------------
+    # 자동 반응 (--slow-on-sight / --red-stop / --auto-turn)
+    # -----------------------------
+    def _areas(self):
+        """지금 보이는 것들의 {클래스: (면적, conf)}. mission.py 와 같은 함수를 쓴다."""
+        return yolo.largest_area_by_class(getattr(self.det, 'boxes', None))
+
+    def _slow_factor(self, areas):
+        """SLOW_CLASSES 중 하나라도 **보이면** SLOW_FACTOR. 면적은 보지 않는다."""
+        return cfg.SLOW_FACTOR if any(c in areas for c in cfg.SLOW_CLASSES) else 1.0
+
+    def _auto_turn_side(self, areas):
+        """자동 회전 방향. 없으면 None.
+
+        화살표(left/right)가 표지판보다 우선한다 — 신호는 그 순간의 지시이고,
+        표지판은 이미 지나온 구간의 안내일 수 있기 때문이다. 화살표는 면적을
+        보지 않고, 표지판은 MISSION_AREA_ENTER['right_sign'] 을 넘어야 한다.
+        """
+        if self.stats['frames'] - self.turn_done_n < cfg.TURN_COOLDOWN_FRAMES:
+            return None
+        # left 와 right 가 동시에 잡히면 conf 가 높은 쪽. 동전 던지기를 피한다.
+        arrows = [(areas[c][1], side) for c, side in cfg.ARROW_TURN.items()
+                  if c in areas]
+        if arrows:
+            return max(arrows)[1]
+        sign = areas.get('right_sign')
+        if sign and sign[0] >= self.area_enter.get('right_sign', float('inf')):
+            return 'right'
+        return None
 
     def _step_turn(self, res):
         """회전 중 한 프레임. 조향은 고정, 탈출은 차선 재획득으로 판정한다.
@@ -139,10 +192,12 @@ class CrossroadDriver(Driver):
         if self.turn_exit_run >= cfg.TURN_EXIT_FRAMES:
             print(f'  [회전] {self.turn_side} 완료 — {held}프레임, 차선 재획득')
             self.turn_side = None
+            self.turn_done_n = self.stats['frames']
             self.sub_state = 'LANE_FOLLOW'
         elif held > cfg.TURN_TIMEOUT_FRAMES:
             print(f'  [정지] 회전 {held}프레임 초과 — 차선을 못 잡았습니다')
             self.turn_side = None
+            self.turn_done_n = self.stats['frames']
             self.stats['halt'] += 1
             self.stopped = True
             self.sub_state = 'TURN_TIMEOUT'
@@ -191,8 +246,34 @@ class CrossroadDriver(Driver):
             self.apply_servo(cfg.SERVO_CENTER)
             return ctrl, roi, res, y_start
 
+        # 자동 반응 세 가지가 모두 꺼져 있으면 면적 계산 자체를 건너뛴다.
+        areas = (self._areas()
+                 if (self.auto_turn or self.red_stop or self.slow_on_sight) else {})
+
+        # 자동 회전은 빨간불 정지보다 **먼저** 본다. 그래야 빨간불에 서 있다가
+        # 화살표가 뜨는 순간 회전으로 넘어간다 — 정지 상태에서도 매 프레임
+        # 여기를 지나기 때문이다.
+        if self.auto_turn:
+            side = self._auto_turn_side(areas)
+            if side is not None and self.start_turn(side, auto=True):
+                self._step_turn(res)
+                return ctrl, roi, res, y_start
+
+        # 빨간불이 임계 면적을 넘으면 정지하고, 화살표가 나올 때까지 대기한다.
+        if self.red_stop:
+            red = areas.get('red')
+            if red and red[0] >= self.area_enter.get('red', float('inf')):
+                self.sub_state = f'STOP_RED_{int(red[0])}'
+                self.stats['object_stop'] += 1
+                self.stopped = True
+                self.apply_motor(0)
+                self.apply_servo(cfg.SERVO_CENTER)
+                return ctrl, roi, res, y_start
+
         if ctrl.ok:
-            self.sub_state = 'LANE_FOLLOW'
+            # 감속은 **차선 추종에만** 건다. 교차로 직진과 회전은 자기 속도가 있다.
+            slow = self._slow_factor(areas) if self.slow_on_sight else 1.0
+            self.sub_state = 'LANE_FOLLOW_SLOW' if slow < 1.0 else 'LANE_FOLLOW'
             self.stats['lane_follow'] += 1
             self.stats['ok'] += 1
             self.fail_streak = 0
@@ -202,7 +283,7 @@ class CrossroadDriver(Driver):
             if self.invert_servo:
                 target = 2 * cfg.SERVO_CENTER - target
             self.apply_servo(self.servo_cmd + self.alpha * (target - self.servo_cmd))
-            self.apply_motor(self.speed)
+            self.apply_motor(int(round(self.speed * slow)))
             return ctrl, roi, res, y_start
 
         # 차선이 없는데 대상 객체도 안 보인다 -> 교차로로 보고 직진한다

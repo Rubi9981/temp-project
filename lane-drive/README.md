@@ -109,6 +109,9 @@ python3 drive.py --replay ../project/captures --no-web   # 3) 주행 로직 통�
 | `crossroad_driver.py` | 교차로 직진 상태 기계 (선택 — `--crossroad` 로 켠다) |
 | `mission.py` | 미션 상태 기계 (선택 — `--mission`. **주행 미연결**) |
 
+객체 면적 집계는 `yolo.largest_area_by_class()` 하나를 `mission.py` 와
+`crossroad_driver.py` 가 함께 쓴다 — 두 곳이 다르게 세면 임계값이 다른 뜻이 된다.
+
 ```
 drive.py ──> hardware  (카메라/서보/모터, 또는 replay)
         ├──> driver    (한 프레임 → 조향/구동 명령)
@@ -643,13 +646,83 @@ T자 교차로(우회전 표지판 구간)에서는 **양쪽 세로 차선이 �
 한 프레임에 full lock 으로 간다. 원호를 늦게 시작하면 반경이 커져 못 돌기
 때문에 의도한 동작이지만, 기구적으로 무리가 없는지 첫 `--dry-run` 에서 볼 것.
 
+### 신호등·표지판 자동 반응 — **기본 켜짐**
+
+객체 종류와 **bbox 면적(= 거리 대용)** 으로 차가 스스로 반응한다. 셋 다 기본으로
+켜져 있고 `--no-*` 로 각각 끈다.
+
+```bash
+python3 drive.py --speed 40         # 셋 다 켜진 상태
+python3 drive.py --no-auto-turn     # 자동 회전만 끄기 (웹 TURN 버튼은 유지)
+```
+
+| 조건 | 동작 | 끄기 |
+|---|---|---|
+| `red` 또는 `right_sign` 이 **보이면** (면적 무관) | 차선 추종 속도 × `SLOW_FACTOR`(0.5) | `--no-slow-on-sight` |
+| `red` 면적 ≥ `MISSION_AREA_ENTER['red']` | 정지 후 방향 신호 대기 | `--no-red-stop` |
+| `left`/`right` 가 **보이면** (면적 무관) | 그 방향으로 즉시 회전 | `--no-auto-turn` |
+| `right_sign` 면적 ≥ `MISSION_AREA_ENTER['right_sign']` | 즉시 우회전 | `--no-auto-turn` |
+
+**면적 임계는 새로 만들지 않고 `MISSION_AREA_ENTER` 를 그대로 읽는다.** 같은
+물리량을 두 곳에서 튜닝하면 한쪽만 고쳐도 조용히 어긋나기 때문이다 — 미션 상태
+기계와 주행이 늘 같은 값을 본다.
+
+`AUTO` 모드의 판단 순서와 그 근거:
+
+```
+1. link_halt                     원격 탐지 링크 끊김        -> 정지
+2. 회전 진행 중                   start_turn() 으로 시작됨    -> 고정 조향 원호
+3. human                         CROSSROAD_STOP_CLASSES     -> 정지
+4. 자동 회전 트리거               방향 신호 / 표지판 면적      -> 회전 시작
+5. red 면적 초과                  MISSION_AREA_ENTER['red']  -> 정지 후 대기
+6. ctrl.ok                       (감속이 켜져 있으면 x0.5)    -> Pure Pursuit
+7. 차선 없음 + 객체 없음                                      -> 교차로 직진
+8. 그 외                                                     -> 실패 처리
+
+2 > 3  기동 중에는 객체로 멈추지 않는다
+3 > 4  사람이 앞을 막고 있으면 회전을 시작하지 않는다
+4 > 5  빨간불에 서 있다가 화살표가 뜨면 그때 회전해야 한다
+```
+
+**화살표가 표지판보다 우선한다.** 신호는 그 순간의 지시이고 표지판은 이미 지나온
+구간의 안내일 수 있어서다. `left` 와 `right` 가 동시에 잡히면 conf 가 높은 쪽을 쓴다.
+
+#### 알아둘 것
+
+**화살표에 면적 게이트가 없는 것이 가장 큰 위험이다.** 잡히는 순간 거리와 무관하게
+돈다. 측정상 화살표는 면적 500~1800 에서 이미 conf 0.83~0.94 로 잡히므로 **꽤
+멀리서도 보인다.** **기본으로 켜져 있으므로** 첫 주행은 반드시 `--dry-run` 으로 어느 지점에서
+`TURN_*` 로 넘어가는지 확인할 것. 게이트가 필요하면 `_auto_turn_side()` 에
+`MISSION_AREA_ENTER['left'/'right']` 를 거는 것이 한 줄이다.
+
+**쿨다운이 없으면 회전이 반복된다.** 다 돌고 나서도 표지판·화살표가 시야에 남아
+있으면 곧바로 다시 돈다. `TURN_COOLDOWN_FRAMES`(90) 동안 자동 트리거를 막는다.
+**웹 버튼 수동 트리거는 쿨다운을 무시한다** — 사람이 보고 누른 것이므로.
+
+**감속은 차선 추종에만 걸린다.** 교차로 직진(`CROSSROAD_SPEED`)과 회전
+(`TURN_SPEED`)은 자기 속도를 그대로 쓴다.
+
+**`CROSSROAD_STOP_CLASSES` 는 그대로 `['human']` 이다.** 빨간불 정지는 면적
+게이트가 있는 별도 분기라, 예전 문제(트랙 반대편 신호등에 반응해 계속 멈춤)가
+재현되지 않는다. 두 경로를 섞지 않는 것이 요점이다.
+
+**규정상 빨간불은 완주 신호일 수 있다.** 제11조 7번이 "신호등 정지 신호 때 계측
+정지"다. 지금은 빨간불에 서서 화살표를 기다리므로, 6번이 결승이라면 그냥 서 있는
+것이 맞는 동작이 된다.
+
+#### 임계값을 다시 재는 법
+
+웹 상태표의 **OBJECTS 행이 이제 요약이 아니라 면적을 보여준다** (`red 812 ·
+right_sign 4310`). 차를 반응시키고 싶은 거리에 놓고 그 숫자를 읽어
+`config.MISSION_AREA_ENTER` 에 넣으면 된다.
+
 ### 미션 상태 관리자 (`mission.py`) — 선택, **주행에 연결 안 됨**
 
 탐지한 객체 종류에 따라 주행을 바꾸기 위한 상태 기계다. **지금은 틀만 있다** —
 상태 전이와 `Intent` 산출까지만 하고 서보·모터에는 연결하지 않았다.
 
 ```bash
-python3 drive.py --mission --replay ../object_detection/obstacles --no-web
+python3 drive.py --mission --replay ../images/obstacles --no-web
 ```
 
 **`--mission` 을 켜고 끄는 것으로 주행 동작은 달라지지 않는다.** `Intent` 를

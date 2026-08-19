@@ -154,3 +154,32 @@ def draw_boxes(frame, boxes):
         cv2.putText(vis, label, (lx + 2, ly + th), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (0, 0, 0), 1, cv2.LINE_AA)
     return vis
+
+
+# ==============================================================================
+# 탐지 결과 집계 — Detector / RemoteDetector 양쪽 boxes 에 그대로 쓴다
+# ==============================================================================
+def largest_area_by_class(boxes):
+    """boxes -> {클래스: (면적, conf)}. 클래스별로 **가장 큰 박스** 하나만 남긴다.
+
+    면적이 곧 거리 대용이므로, 같은 클래스가 여러 개면 가장 가까운 것이 판단
+    기준이 되어야 한다. 순수 함수라 어느 Detector 의 boxes 든 받는다.
+    """
+    out = {}
+    for x1, y1, x2, y2, name, conf in (boxes or []):
+        area = float((x2 - x1) * (y2 - y1))
+        if area > out.get(name, (0.0, 0.0))[0]:
+            out[name] = (area, float(conf))
+    return out
+
+
+def summary_with_area(boxes):
+    """'red 812 · right_sign 4310' — 상태표에서 면적 임계를 눈으로 재기 위한 것.
+
+    config.MISSION_AREA_ENTER 를 다시 잴 때, 차를 원하는 거리에 놓고 이 숫자를
+    읽으면 그대로 임계값이 된다.
+    """
+    areas = largest_area_by_class(boxes)
+    if not areas:
+        return '-'
+    return ' · '.join(f'{k} {int(v[0])}' for k, v in sorted(areas.items()))

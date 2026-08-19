@@ -18,7 +18,7 @@
 사용:
     python3 watch.py                                 # 매 프레임 탐지
     python3 watch.py --detect-every 3 --imgsz 448    # 화면을 부드럽게
-    python3 watch.py --replay ../object_detection/obstacles --replay-loop
+    python3 watch.py --replay ../images/obstacles --replay-loop
 
     http://<Pi주소>:5002
 

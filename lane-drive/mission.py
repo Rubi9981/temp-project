@@ -49,6 +49,7 @@ import collections
 from dataclasses import dataclass, field
 
 import config as cfg
+import yolo
 
 # -----------------------------
 # 상태 이름 (crossroad_driver 의 sub_state 와 같이 평범한 문자열을 쓴다)
@@ -123,13 +124,9 @@ class Observation:
         age_ms = float(link.get('age_ms', 0.0))
         link_ok = bool(link.get('ok', True))
 
-        # 종류별로 **가장 큰 박스** 하나만 남긴다. 면적이 거리 대용이므로
-        # 같은 종류가 여러 개면 가장 가까운 것이 판단 기준이 된다.
-        objects = {}
-        for x1, y1, x2, y2, name, conf in (det.boxes or []):
-            area = float((x2 - x1) * (y2 - y1))
-            if area > objects.get(name, (0.0, 0.0))[0]:
-                objects[name] = (area, float(conf))
+        # 종류별 최대 면적 하나. crossroad_driver 도 같은 함수를 쓴다 —
+        # 두 곳이 다른 방식으로 면적을 세면 임계값이 서로 다른 뜻이 된다.
+        objects = yolo.largest_area_by_class(det.boxes)
 
         return cls(
             n=n, lane_ok=lane_ok, kappa=kappa,
