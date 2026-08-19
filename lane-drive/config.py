@@ -355,7 +355,7 @@ CROSSROAD_STOP_CLASSES = ['human']
 # 무엇보다 "어느 거리에서 반응해야 하는가"는 주행 속도에 달렸다.
 MISSION_AREA_ENTER = {
     'right_sign': 4200,
-    'red': 700,
+    'red': 600,
     'left': 500,
     'right': 500,
     'human': 5000,
