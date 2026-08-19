@@ -72,6 +72,7 @@ class CrossroadDriver(Driver):
         self.turn_side = None           # 'left' | 'right' | None(회전 아님)
         self.turn_start_n = 0
         self.turn_exit_run = 0
+        self.turn_back_left = 0     # 좌회전 시작 전 남은 후진 프레임 수
         # 회전이 끝난 프레임. 쿨다운 기준점이다. 시작할 때는 쿨다운이 걸려
         # 있으면 안 되므로 과거로 밀어 둔다.
         self.turn_done_n = -cfg.TURN_COOLDOWN_FRAMES
@@ -109,6 +110,7 @@ class CrossroadDriver(Driver):
         if ok:
             self.crossroad_frames = 0
             self.turn_side = None       # 모드가 바뀌면 진행 중인 회전을 버린다
+            self.turn_back_left = 0
             self.sub_state = 'LANE_FOLLOW' if mode == 'AUTO' else mode
         return ok
 
@@ -125,9 +127,14 @@ class CrossroadDriver(Driver):
         self.turn_start_n = self.stats['frames']
         self.turn_exit_run = 0
         self.stopped = False
-        self.sub_state = f'TURN_{side.upper()}'
+        # **좌회전만 후진으로 시작한다.** 서보의 좌/우 가동각이 달라 좌회전
+        # 반경이 크기 때문에, 물러나서 여유 거리를 만든 뒤 꺾는다.
+        self.turn_back_left = cfg.TURN_BACK_FRAMES if side == 'left' else 0
+        self.sub_state = ('TURN_LEFT_BACK' if self.turn_back_left
+                          else f'TURN_{side.upper()}')
+        back = (f'후진 {self.turn_back_left}프레임 후 ' if self.turn_back_left else '')
         print(f"  [회전] {side} 시작 ({'자동' if auto else '수동'}) — "
-              f'servo {self.turn_servo[side]}')
+              f'{back}servo {self.turn_servo[side]}')
         return True
 
     # -----------------------------
@@ -163,6 +170,10 @@ class CrossroadDriver(Driver):
     def _step_turn(self, res):
         """회전 중 한 프레임. 조향은 고정, 탈출은 차선 재획득으로 판정한다.
 
+        좌회전이면 TURN_BACK_FRAMES 동안 먼저 곧게 후진한다 (서보의 좌/우
+        가동각이 달라 좌회전 반경이 크기 때문이다). 후진이 끝나야 회전 시간이
+        시작된다.
+
         TURN_MIN_FRAMES 동안은 탈출 조건을 아예 보지 않는다 — 차선이 아직
         보이는 상태에서 버튼을 누르면 첫 프레임부터 조건이 만족되어 회전이
         0.2초 만에 끝나버리기 때문이다.
@@ -174,8 +185,25 @@ class CrossroadDriver(Driver):
         차는 존재하지 않는 중심선을 향하게 된다.
         """
         self.stats['turn'] += 1
+
+        if self.turn_back_left > 0:
+            # 후진 단계. 조향은 중립으로 두고 곧게 물러난다.
+            self.turn_back_left -= 1
+            self.sub_state = 'TURN_LEFT_BACK'
+            self.apply_servo(cfg.SERVO_CENTER)
+            self.apply_motor(-self.turn_speed)
+            if self.turn_back_left == 0:
+                # 다음 프레임부터가 실제 회전이다. 기준점을 다시 잡아 후진
+                # 시간이 TURN_MIN_FRAMES / TURN_TIMEOUT_FRAMES 를 먹지 않게 한다.
+                # **sub_state 는 여기서 바꾸지 않는다** — 이번 프레임에 나간
+                # 명령은 아직 후진이라, 미리 라벨을 바꾸면 화면과 실제가 어긋난다.
+                self.turn_start_n = self.stats['frames']
+                print(f'  [회전] 후진 완료 — {self.turn_side} 꺾기 시작')
+            return
+
         # apply_servo 는 평활을 하지 않는다 (EMA 는 차선 추종 분기에서 계산된다).
         # 원호를 늦게 시작하면 반경이 커져 못 돌기 때문에 한 프레임에 넣는다.
+        self.sub_state = f'TURN_{self.turn_side.upper()}'
         self.apply_servo(self.turn_servo[self.turn_side])
         self.apply_motor(self.turn_speed)
 
