@@ -205,7 +205,7 @@ YOLO_JPEG_QUALITY = 85
 
 # 한 번의 왕복을 기다리는 최대 시간(초). 넘으면 "결과 없음"으로 처리하고
 # 다음 프레임으로 넘어간다. 절대 예외로 죽지 않는다.
-YOLO_TIMEOUT_S = 0.2
+YOLO_TIMEOUT_S = 0.5
 
 # 유효한 탐지 결과가 이 시간(ms) 이상 없으면 모터를 세운다. 0 이면 끈다.
 #
@@ -349,13 +349,13 @@ CROSSROAD_STOP_CLASSES = ['human']
 # **전부 실트랙 튜닝 대상이다.** 위 분포는 best_v3 기준이고 지금 모델은 v6 이며,
 # 무엇보다 "어느 거리에서 반응해야 하는가"는 주행 속도에 달렸다.
 MISSION_AREA_ENTER = {
-    'right_sign': 2500,
-    'red': 1100,
+    'right_sign': 4200,
+    'red': 700,
     'left': 500,
-    'right': 1000,
-    'human': 11000,
-    'car_red': 2000,
-    'car_white': 3300,
+    'right': 500,
+    'human': 5000,
+    'car_red': 7000,
+    'car_white': 7000,
 }
 
 # 직선으로 볼 곡률 상한 (1/cm). 이 값 미만이면 Observation.straight 가 참이 된다.
