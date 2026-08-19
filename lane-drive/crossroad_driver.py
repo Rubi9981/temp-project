@@ -77,6 +77,13 @@ class CrossroadDriver(Driver):
         # 있으면 안 되므로 과거로 밀어 둔다.
         self.turn_done_n = -cfg.TURN_COOLDOWN_FRAMES
         self.turn_servo = self._turn_servo_table()
+        for side in ('left', 'right'):
+            mn, to = self._turn_frames(side)
+            if to <= mn:
+                # 조용히 실패하는 조합이라 시작할 때 잡는다 — 탈출 조건을 보기
+                # 시작하는 시점이 이미 타임아웃을 넘으면 그 방향은 매번 정지한다.
+                print(f'[경고] {side} 회전: TURN_TIMEOUT({to}) <= TURN_MIN({mn}) 이라 '
+                      '항상 타임아웃으로 끝납니다.')
         self.stats.update({'lane_follow': 0, 'crossroad': 0, 'object_stop': 0,
                            'turn': 0})
 
@@ -104,6 +111,17 @@ class CrossroadDriver(Driver):
                 value = 2 * cfg.SERVO_CENTER - value
             table[side] = int(value)
         return table
+
+    def _turn_frames(self, side):
+        """그 방향의 (최소 회전 프레임, 타임아웃 프레임).
+
+        좌회전은 서보 좌측 가동각이 작아 반경이 크고, 그만큼 오래 걸린다.
+        **둘 다 같은 배율로 늘려야 한다** — MIN 만 늘리면 탈출 조건을 보기
+        시작하는 시점이 이미 타임아웃을 넘어 매번 정지로 끝난다.
+        """
+        scale = cfg.TURN_LEFT_FRAME_SCALE if side == 'left' else 1.0
+        return (int(cfg.TURN_MIN_FRAMES * scale),
+                int(cfg.TURN_TIMEOUT_FRAMES * scale))
 
     def set_mode(self, mode):
         ok = super().set_mode(mode)
@@ -133,8 +151,9 @@ class CrossroadDriver(Driver):
         self.sub_state = ('TURN_LEFT_BACK' if self.turn_back_left
                           else f'TURN_{side.upper()}')
         back = (f'후진 {self.turn_back_left}프레임 후 ' if self.turn_back_left else '')
+        mn, to = self._turn_frames(side)
         print(f"  [회전] {side} 시작 ({'자동' if auto else '수동'}) — "
-              f'{back}servo {self.turn_servo[side]}')
+              f'{back}servo {self.turn_servo[side]}  최소 {mn} / 최대 {to}프레임')
         return True
 
     # -----------------------------
@@ -170,11 +189,11 @@ class CrossroadDriver(Driver):
     def _step_turn(self, res):
         """회전 중 한 프레임. 조향은 고정, 탈출은 차선 재획득으로 판정한다.
 
-        좌회전이면 TURN_BACK_FRAMES 동안 먼저 곧게 후진한다 (서보의 좌/우
-        가동각이 달라 좌회전 반경이 크기 때문이다). 후진이 끝나야 회전 시간이
-        시작된다.
+        좌회전이면 TURN_BACK_FRAMES 동안 먼저 곧게 후진하고, 회전 시간도
+        TURN_LEFT_FRAME_SCALE 배 길다 (서보의 좌/우 가동각이 달라 좌회전
+        반경이 크기 때문이다). 후진이 끝나야 회전 시간이 시작된다.
 
-        TURN_MIN_FRAMES 동안은 탈출 조건을 아예 보지 않는다 — 차선이 아직
+        최소 회전 프레임(_turn_frames) 동안은 탈출 조건을 아예 보지 않는다 — 차선이 아직
         보이는 상태에서 버튼을 누르면 첫 프레임부터 조건이 만족되어 회전이
         0.2초 만에 끝나버리기 때문이다.
 
@@ -207,8 +226,9 @@ class CrossroadDriver(Driver):
         self.apply_servo(self.turn_servo[self.turn_side])
         self.apply_motor(self.turn_speed)
 
+        min_frames, timeout_frames = self._turn_frames(self.turn_side)
         held = self.stats['frames'] - self.turn_start_n
-        if held < cfg.TURN_MIN_FRAMES:
+        if held < min_frames:
             # 최소 회전 구간. 차선이 아직 보이는 상태에서 버튼을 눌렀거나
             # 회전 초반에 가로선을 차선으로 오인해도 여기서 걸러진다.
             return
@@ -222,7 +242,7 @@ class CrossroadDriver(Driver):
             self.turn_side = None
             self.turn_done_n = self.stats['frames']
             self.sub_state = 'LANE_FOLLOW'
-        elif held > cfg.TURN_TIMEOUT_FRAMES:
+        elif held > timeout_frames:
             print(f'  [정지] 회전 {held}프레임 초과 — 차선을 못 잡았습니다')
             self.turn_side = None
             self.turn_done_n = self.stats['frames']
