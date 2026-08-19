@@ -11,10 +11,10 @@ from ultralytics import YOLO
 BASE_DIR = Path(__file__).resolve().parent
 
 # 1) YOLO 모델 파일 경로 (.pt)
-MODEL_PATH = BASE_DIR / "best_v6.pt"
+MODEL_PATH = BASE_DIR / "best_v7.pt"
 
 # 2) 탐지할 이미지가 들어있는 폴더 경로
-PHOTOS_DIR = BASE_DIR / "traffic_lights_2"
+PHOTOS_DIR = BASE_DIR / "cars"
 
 # 3) 객체 탐지 신뢰도(Confidence) 임계값
 CONF_THRESHOLD = 0.25
