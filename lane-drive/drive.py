@@ -24,6 +24,7 @@ afb1.flask 는 쓰지 않는다 — 동작을 확인할 수 없어 화면이 안
     python3 drive.py --no-yolo --replay ../project/captures   # 서버 없이 로직만 검증
     python3 drive.py --yolo-remote 192.168.0.7:5010 # 맥 주소가 바뀌었을 때
     python3 drive.py --no-crossroad                 # 교차로 직진 없이 차선 추종만
+    python3 drive.py --mission --replay <폴더>       # 미션 상태 전이만 관찰 (주행 무관)
 
 **기본값이 원격 추론 + 교차로 통과다.** 인자 없이 실행하면 config.py 의
 YOLO_REMOTE_DEFAULT 로 붙으며, 서버가 없으면 하드웨어를 건드리기 전에 끝난다.
@@ -79,6 +80,11 @@ def main():
                     help='교차로 직진을 끄고 기존 Driver 로 주행한다')
     ap.add_argument('--cross-speed', type=int, default=cfg.CROSSROAD_SPEED,
                     help=f'교차로 직진 속도 (기본 {cfg.CROSSROAD_SPEED})')
+    # 미션 상태 기계 (mission.py). **아직 주행에 관여하지 않는다** — 상태를
+    # 화면에 띄우고 종료 시 전이 이력을 찍기만 한다.
+    ap.add_argument('--mission', action='store_true',
+                    help='미션 상태 기계를 켠다. 관측만 하므로 주행 동작은 '
+                         '켜기 전과 완전히 같다')
     # 디버그 화면
     ap.add_argument('--no-web', action='store_true', help='웹 대시보드 끄기')
     ap.add_argument('--port', type=int, default=5000)
@@ -95,8 +101,8 @@ def main():
                          '= 차가 오른쪽으로 쏠릴 때 쓴다')
     # 객체 탐지 (기본 꺼짐 — 주지 않으면 ultralytics 를 import 조차 하지 않는다)
     ap.add_argument('--yolo', action='store_true',
-                    help='YOLO 객체 탐지를 켠다. 결과는 화면 상태표에만 표시되고 '
-                         '주행 제어에는 관여하지 않는다')
+                    help='YOLO 객체 탐지를 켠다. CrossroadDriver의 객체 정지·교차로 '
+                         '판단에 사용한다')
     # 모델 관련 이름은 watch.py 와 맞춘다 (--model / --conf / --imgsz).
     # 주기만 --yolo-every 로 남긴다 — 이 파일의 --detect 는 차선 검출기를
     # 고르는 옵션이라 --detect-every 로 쓰면 헷갈린다.
@@ -220,6 +226,18 @@ def main():
             print('       --yolo 또는 --yolo-remote 를 함께 주세요.')
     else:
         driver = driverlib.Driver(*driver_args, **driver_kw)
+    mission = None
+    if args.mission:
+        import mission as missionlib
+        mission = missionlib.MissionManager()
+        print(f'[미션] 상태 기계 켜짐 — 직선 복귀 {cfg.MISSION_RETURN_FRAMES}프레임  '
+              f'소실 복귀 {cfg.MISSION_GONE_FRAMES}프레임  '
+              f'타임아웃 {cfg.MISSION_TIMEOUT_FRAMES}프레임')
+        print('       주행에는 관여하지 않습니다 (상태 표시 전용).')
+        if det is None:
+            print('[경고] 탐지가 꺼져 있어 객체 진입 판정이 빠집니다. '
+                  '차선 실종(CROSSING)만 관측됩니다.')
+
     shared = loop.Shared()
     prof = loop.Profiler(args.profile)
 
@@ -237,14 +255,15 @@ def main():
     t0 = time.time()
 
     if not args.web:
-        loop.run_loop(hw, driver, shared, args, prof, det)
+        loop.run_loop(hw, driver, shared, args, prof, det, mission)
     else:
         app = webui.make_app(shared, driver,
                              save_dir=os.path.join(
                                  os.path.dirname(os.path.abspath(__file__)),
                                  'captures'))
         worker = threading.Thread(target=loop.run_loop,
-                                  args=(hw, driver, shared, args, prof, det),
+                                  args=(hw, driver, shared, args, prof, det,
+                                        mission),
                                   daemon=True)
         worker.start()
 
@@ -267,7 +286,7 @@ def main():
     if args.window:
         cv2.destroyAllWindows()
     hw.shutdown()
-    loop.print_summary(driver, hw, time.time() - t0)
+    loop.print_summary(driver, hw, time.time() - t0, mission)
 
 
 if __name__ == '__main__':

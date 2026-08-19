@@ -1,6 +1,7 @@
-"""YOLOv8 객체 탐지 — 주행 화면에 "무엇이 보이는지"를 띄우기 위한 것.
+"""YOLOv8 객체 탐지.
 
-주행 제어에는 관여하지 않는다. 탐지 결과는 상태표에 문자열 한 줄로만 나간다.
+탐지 결과는 상태표에 표시하고, CrossroadDriver에서는 정지 대상 객체와
+교차로 직진 여부를 판단하는 데 사용한다.
 
     det = Detector(cfg.YOLO_MODEL_PATH, conf=0.25, imgsz=640)
     det.infer(frame)        # -> 'human 1, red 1'

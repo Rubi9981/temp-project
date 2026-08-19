@@ -6,7 +6,7 @@ raspi/L_5_Capture.py 방식을 따른다. afb1.flask 는 쓰지 않는다 — �
     /              대시보드 HTML
     /video_feed    MJPEG 스트림
     /api/status    텔레메트리 JSON
-    /api/control   모드 전환 / 비상정지 / 방향키 / 캡처 (POST)
+    /api/control   모드 전환 / 비상정지 / 방향키 / 캡처 / 좌우 회전 (POST)
 
 HTML 은 PAGE 상수로 인라인한다 — templates/ 디렉터리를 Pi 로 같이 옮길 필요가 없다.
 Flask 는 make_app() 안에서 지연 import 한다. Flask 없는 Pi 에서도 --no-web 경로는
@@ -35,7 +35,7 @@ PAGE = """
  button{font-size:15px;padding:10px 16px;margin:4px 4px 0 0;border:0;
         border-radius:6px;color:#fff;cursor:pointer}
  .auto{background:#1a7f37}.manual{background:#1f6feb}.stop{background:#8b6b00}
- .estop{background:#b62324}.cap{background:#30363d}
+ .estop{background:#b62324}.cap{background:#30363d}.turn{background:#6e40c9}
  button.on{outline:3px solid #fff}
  #pad{margin-top:14px}
  #pad button{width:74px;height:56px;font-size:22px;background:#30363d}
@@ -56,6 +56,7 @@ PAGE = """
       <tr><td>FRAMES</td><td id="frames">-</td></tr>
       <tr><td>OBJECTS</td><td id="objects">-</td></tr>
       <tr><td>LINK</td><td id="link">-</td></tr>
+      <tr><td>MISSION</td><td id="mission">-</td></tr>
     </table>
     <div>
       <button class="auto"   id="b_AUTO"   onclick="setMode('AUTO')">AUTO</button>
@@ -65,6 +66,10 @@ PAGE = """
     <div>
       <button class="estop" onclick="cmd('estop')">EMERGENCY STOP</button>
       <button class="cap"   onclick="cmd('capture')">CAPTURE</button>
+    </div>
+    <div>
+      <button class="turn" onclick="turn('left')">&#9664; TURN L</button>
+      <button class="turn" onclick="turn('right')">TURN R &#9654;</button>
     </div>
 
     <div id="pad" class="off">
@@ -84,6 +89,12 @@ function post(body){return fetch('/api/control',{method:'POST',
   headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
 function cmd(a){return post({action:a});}
 function setMode(m){return post({action:'set_mode',mode:m});}
+// 거부 사유를 눈에 띄게 알린다 — 트랙에서 버튼을 눌렀는데 아무 일도 안 일어나면
+// AUTO 가 아니어서인지 crossroad 가 꺼져서인지 알 수 없다
+async function turn(s){
+  const j = await (await post({action:'turn',side:s})).json();
+  if(!j.ok) alert(j.reason || '회전 거부');
+}
 function keyDown(k){return post({action:'key_down',key:k});}
 function keyUp(k){return post({action:'key_up',key:k});}
 
@@ -112,7 +123,7 @@ addEventListener('blur',()=>{for(const k of held)keyUp(k); held.clear();});
 
 setInterval(async()=>{
   const r=await fetch('/api/status'); const s=await r.json();
-  for(const k of ['mode','servo','motor','status','frames','objects','link'])
+  for(const k of ['mode','servo','motor','status','frames','objects','link','mission'])
     document.getElementById(k).textContent=s[k];
   document.getElementById('fps').textContent=s.fps.toFixed(1);
   document.getElementById('fps_avg').textContent=s.fps_avg.toFixed(1);
@@ -197,6 +208,19 @@ def make_app(shared, driver, save_dir):
                         driver.apply_motor(0)
                     elif key in ('ArrowLeft', 'ArrowRight'):
                         driver.apply_servo(cfg.SERVO_CENTER)
+
+            elif action == 'turn':
+                # 고정 조향 원호로 좌/우 회전. CrossroadDriver 에만 있다.
+                side = str(data.get('side', '')).lower()
+                if not hasattr(driver, 'start_turn'):
+                    return jsonify({'ok': False, 'mode': driver.mode,
+                                    'reason': '교차로 드라이버가 아닙니다 '
+                                              '(--no-crossroad 로 실행 중)'})
+                if not driver.start_turn(side):
+                    return jsonify({'ok': False, 'mode': driver.mode,
+                                    'reason': f'회전 거부 — side={side!r}, '
+                                              f'mode={driver.mode} (AUTO 에서만)'})
+                print(f'  [web] 회전 -> {side}')
 
             elif action == 'capture':
                 with shared.lock:

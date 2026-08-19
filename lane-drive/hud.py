@@ -61,6 +61,11 @@ def overlay(roi, y_start, res, ctrl, tel):
         color = ((0, 0, 255) if 'STOP' in sub or 'LOST' in sub or 'FAIL' in sub
                  else (0, 255, 0) if sub == 'LANE_FOLLOW' else (0, 165, 255))
         rows.insert(1, (f'STATE: {sub}', color))
+    # 미션 상태 기계 (--mission). 상태 이름만 — 사유는 웹 상태표에 나온다
+    if tel.get('mission', '-') != '-':
+        name = tel['mission'].split(' — ')[0]
+        rows.append((f'MISSION: {name}',
+                     (0, 0, 255) if name == 'HALT' else (255, 200, 0)))
     for i, (text, color) in enumerate(rows):
         y = 28 + i * 26
         cv2.putText(vis, text, (14, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
