@@ -135,18 +135,14 @@ class Shared:
         # (없으면 화면에 undefined 가 뜬다)
         self.tel = {'mode': 'STOP', 'fps': 0.0, 'fps_avg': 0.0,
                     'servo': cfg.SERVO_CENTER, 'motor': 0, 'status': 'IDLE',
-                    'halted': False, 'frames': 0, 'objects': '-', 'link': '-',
-                    'mission': '-'}
+                    'halted': False, 'frames': 0, 'objects': '-', 'link': '-'}
 
 
 # ==============================================================================
 # 루프
 # ==============================================================================
-def run_loop(hw, driver, shared, args, prof=None, det=None, mission=None):
+def run_loop(hw, driver, shared, args, prof=None, det=None):
     """주행 루프. det 는 yolo.Detector 또는 None.
-
-    mission 은 mission.MissionManager 또는 None. **주행에 관여하지 않는다** —
-    상태를 갱신해 화면에 띄우기만 하고, 조향/구동은 driver 가 그대로 한다.
 
     주행 루프를 지연시킬 수 있는 작업(화면, YOLO, 녹화)은 Worker 로 내보내고
     이 루프에는 read -> step 만 남긴다. YOLO 결과는 비동기로 갱신되지만
@@ -222,17 +218,11 @@ def run_loop(hw, driver, shared, args, prof=None, det=None, mission=None):
 
             n = driver.stats['frames']
 
-            # 미션 상태 갱신. **아직 주행에 연결되어 있지 않다** — 여기서 나온
-            # Intent 를 아무도 소비하지 않으므로, mission 을 켜고 끄는 것으로
-            # 주행 동작이 달라지지 않는다. 주행에 물릴 때 이 호출이
-            # Driver.step() 안으로 옮겨 간다.
-            if mission is not None:
-                mission.observe(n, ctrl, det)
-
             # 객체 탐지. BEV 가 아니라 원본 카메라 프레임을 그대로 넘긴다
             # (채널 변환 금지 — yolo.py docstring). 워커가 아직 이전 프레임을
-            # 처리 중이면 이번 것은 버린다. --yolo-every 는 "제안 주기"로,
-            # NCNN 이 코어를 독점해 제어 루프를 굶기지 않게 하는 조절 손잡이다.
+            # 처리 중이면 이번 것은 버린다. --yolo-every 는 "제안 주기"다 —
+            # 원격 추론이 기본이라 Pi CPU 를 쓰지 않으므로 자주 제안해도 되고,
+            # --yolo 로 로컬 추론에 되돌릴 때만 코어를 아끼려 늘린다.
             if yolo_w is not None and n % args.yolo_every == 0:
                 yolo_w.offer(frame)
 
@@ -243,17 +233,19 @@ def run_loop(hw, driver, shared, args, prof=None, det=None, mission=None):
 
             tel = {'mode': driver.mode, 'fps': fps_inst, 'fps_avg': fps_avg,
                    'servo': int(round(driver.servo_cmd)), 'motor': driver.motor_cmd,
-                   # CrossroadDriver 는 sub_state 로 더 자세히 알려준다
-                   'status': getattr(driver, 'sub_state', None)
-                             or ('OK' if ctrl.ok else 'NO LANE'),
+                   # CrossroadDriver 는 판단 근거까지 붙여 알려준다
+                   # ('STOP_RED — 면적 712 >= 600' 처럼). 이력은 여기서 만들지
+                   # 않는다 — 매 프레임 24줄을 문자열로 엮는 것은 제어 루프가
+                   # 할 일이 아니라, webui 의 /api/status 가 필요할 때 만든다.
+                   'status': (driver.status_str if hasattr(driver, 'status_str')
+                              else ('OK' if ctrl.ok else 'NO LANE')),
                    'sub_state': getattr(driver, 'sub_state', ''),
                    'halted': driver.stopped, 'frames': n,
-                   # 요약이 아니라 **면적**을 띄운다 — MISSION_AREA_ENTER 를
+                   # 요약이 아니라 **면적**을 띄운다 — DETECTION_AREA_ENTER 를
                    # 다시 잴 때 차를 원하는 거리에 놓고 이 숫자를 읽으면 된다.
                    'objects': (yolo.summary_with_area(det.boxes)
                                if det is not None else '-'),
-                   'link': getattr(det, 'link_str', '-') if det is not None else '-',
-                   'mission': mission.status_str if mission is not None else '-'}
+                   'link': getattr(det, 'link_str', '-') if det is not None else '-'}
 
             # 텔레메트리와 원본 프레임은 주 루프가 소유한다 — 참조 대입뿐이라
             # 비용이 없고, 화면 워커가 밀려도 상태표는 살아 있다.
@@ -319,7 +311,7 @@ def run_loop(hw, driver, shared, args, prof=None, det=None, mission=None):
             w.stop()
 
 
-def print_summary(driver, hw, elapsed, mission=None):
+def print_summary(driver, hw, elapsed):
     s = driver.stats
     print()
     print('=' * 52)
@@ -332,11 +324,12 @@ def print_summary(driver, hw, elapsed, mission=None):
     print(f"  연속 실패로 정지한 횟수: {s['halt']}")
     print('=' * 52)
 
-    if mission is not None:
-        # 어디서 왜 상태가 바뀌었는지. 주행에 관여하지 않으므로 이 이력이
-        # 상태 기계를 확인하는 유일한 창구다.
-        print(f'  [미션] 마지막 상태 {mission.status_str}')
-        print(mission.format_history())
+    if hasattr(driver, 'format_history'):
+        # 화면의 sub_state 는 현재 프레임 한 줄뿐이라, 주행이 끝난 뒤에는
+        # 무엇이 언제 왜 바뀌었는지 여기서만 볼 수 있다.
+        print('  [판단 이력]')
+        for line in driver.format_history().split('\n'):
+            print('    ' + line)
         print('=' * 52)
 
     if isinstance(hw, hardware.ReplayHardware):

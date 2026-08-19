@@ -696,11 +696,11 @@ python3 drive.py --no-auto-turn     # 자동 회전만 끄기 (웹 TURN 버튼�
 | 조건 | 동작 | 끄기 |
 |---|---|---|
 | `red` 또는 `right_sign` 이 **보이면** (면적 무관) | 차선 추종 속도 × `SLOW_FACTOR`(0.5) | `--no-slow-on-sight` |
-| `red` 면적 ≥ `MISSION_AREA_ENTER['red']` | 정지 후 방향 신호 대기 | `--no-red-stop` |
+| `red` 면적 ≥ `DETECTION_AREA_ENTER['red']` | 정지 후 방향 신호 대기 | `--no-red-stop` |
 | `left`/`right` 가 **보이면** (면적 무관) | 그 방향으로 즉시 회전 | `--no-auto-turn` |
-| `right_sign` 면적 ≥ `MISSION_AREA_ENTER['right_sign']` | 즉시 우회전 | `--no-auto-turn` |
+| `right_sign` 면적 ≥ `DETECTION_AREA_ENTER['right_sign']` | 즉시 우회전 | `--no-auto-turn` |
 
-**면적 임계는 새로 만들지 않고 `MISSION_AREA_ENTER` 를 그대로 읽는다.** 같은
+**면적 임계는 새로 만들지 않고 `DETECTION_AREA_ENTER` 를 그대로 읽는다.** 같은
 물리량을 두 곳에서 튜닝하면 한쪽만 고쳐도 조용히 어긋나기 때문이다 — 미션 상태
 기계와 주행이 늘 같은 값을 본다.
 
@@ -711,7 +711,7 @@ python3 drive.py --no-auto-turn     # 자동 회전만 끄기 (웹 TURN 버튼�
 2. 회전 진행 중                   start_turn() 으로 시작됨    -> 고정 조향 원호
 3. human                         CROSSROAD_STOP_CLASSES     -> 정지
 4. 자동 회전 트리거               방향 신호 / 표지판 면적      -> 회전 시작
-5. red 면적 초과                  MISSION_AREA_ENTER['red']  -> 정지 후 대기
+5. red 면적 초과                  DETECTION_AREA_ENTER['red']  -> 정지 후 대기
 6. ctrl.ok                       (감속이 켜져 있으면 x0.5)    -> Pure Pursuit
 7. 차선 없음 + 객체 없음                                      -> 교차로 직진
 8. 그 외                                                     -> 실패 처리
@@ -730,7 +730,7 @@ python3 drive.py --no-auto-turn     # 자동 회전만 끄기 (웹 TURN 버튼�
 돈다. 측정상 화살표는 면적 500~1800 에서 이미 conf 0.83~0.94 로 잡히므로 **꽤
 멀리서도 보인다.** **기본으로 켜져 있으므로** 첫 주행은 반드시 `--dry-run` 으로 어느 지점에서
 `TURN_*` 로 넘어가는지 확인할 것. 게이트가 필요하면 `_auto_turn_side()` 에
-`MISSION_AREA_ENTER['left'/'right']` 를 거는 것이 한 줄이다.
+`DETECTION_AREA_ENTER['left'/'right']` 를 거는 것이 한 줄이다.
 
 **쿨다운이 없으면 회전이 반복된다.** 다 돌고 나서도 표지판·화살표가 시야에 남아
 있으면 곧바로 다시 돈다. `TURN_COOLDOWN_FRAMES`(90) 동안 자동 트리거를 막는다.
@@ -751,7 +751,7 @@ python3 drive.py --no-auto-turn     # 자동 회전만 끄기 (웹 TURN 버튼�
 
 웹 상태표의 **OBJECTS 행이 이제 요약이 아니라 면적을 보여준다** (`red 812 ·
 right_sign 4310`). 차를 반응시키고 싶은 거리에 놓고 그 숫자를 읽어
-`config.MISSION_AREA_ENTER` 에 넣으면 된다.
+`config.DETECTION_AREA_ENTER` 에 넣으면 된다.
 
 ### 미션 상태 관리자 (`mission.py`) — 선택, **주행에 연결 안 됨**
 
@@ -783,7 +783,7 @@ python3 drive.py --mission --replay ../images/obstacles --no-web
 신호등보다 앞에 둔다.
 
 **진입은 bbox 면적으로 한다.** 면적이 곧 거리 대용이라, 트랙 반대편에 작게 잡힌
-표지판에는 반응하지 않는다. 임계는 `cfg.MISSION_AREA_ENTER` 에 종류별로 있다.
+표지판에는 반응하지 않는다. 임계는 `cfg.DETECTION_AREA_ENTER` 에 종류별로 있다.
 
 **복귀 규칙은 두 종류뿐이다.**
 

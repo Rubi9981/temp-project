@@ -41,6 +41,11 @@ PAGE = """
  #pad button{width:74px;height:56px;font-size:22px;background:#30363d}
  #pad.off{opacity:.35;pointer-events:none}
  .hint{color:#888;font-size:13px;margin-top:8px;line-height:1.5}
+ .log{margin-top:14px}
+ .loghead{color:#888;font-size:12px;margin-bottom:4px}
+ #decisions{background:#0b0b0b;border:1px solid #262626;border-radius:6px;
+            padding:8px;margin:0;font-size:12px;line-height:1.45;color:#c9d1d9;
+            max-height:230px;overflow:auto;white-space:pre}
 </style></head><body>
 <h1>Lane Tracer — live debug</h1>
 <div class="wrap">
@@ -56,8 +61,11 @@ PAGE = """
       <tr><td>FRAMES</td><td id="frames">-</td></tr>
       <tr><td>OBJECTS</td><td id="objects">-</td></tr>
       <tr><td>LINK</td><td id="link">-</td></tr>
-      <tr><td>MISSION</td><td id="mission">-</td></tr>
     </table>
+    <div class="log">
+      <div class="loghead">판단 이력 (최근)</div>
+      <pre id="decisions">-</pre>
+    </div>
     <div>
       <button class="auto"   id="b_AUTO"   onclick="setMode('AUTO')">AUTO</button>
       <button class="manual" id="b_MANUAL" onclick="setMode('MANUAL')">MANUAL</button>
@@ -123,8 +131,14 @@ addEventListener('blur',()=>{for(const k of held)keyUp(k); held.clear();});
 
 setInterval(async()=>{
   const r=await fetch('/api/status'); const s=await r.json();
-  for(const k of ['mode','servo','motor','status','frames','objects','link','mission'])
+  for(const k of ['mode','servo','motor','status','frames','objects','link'])
     document.getElementById(k).textContent=s[k];
+  const dec=document.getElementById('decisions');
+  if(s.decisions!==undefined && dec.textContent!==s.decisions){
+    const atBottom = dec.scrollTop + dec.clientHeight >= dec.scrollHeight - 4;
+    dec.textContent = s.decisions;
+    if(atBottom) dec.scrollTop = dec.scrollHeight;   // 최신 줄을 따라간다
+  }
   document.getElementById('fps').textContent=s.fps.toFixed(1);
   document.getElementById('fps_avg').textContent=s.fps_avg.toFixed(1);
   for(const m of ['AUTO','MANUAL','STOP'])
@@ -167,7 +181,12 @@ def make_app(shared, driver, save_dir):
     @app.route('/api/status')
     def status():
         with shared.lock:
-            return jsonify(dict(shared.tel))
+            tel = dict(shared.tel)
+        # 판단 이력은 **여기서** 만든다. 제어 루프가 매 프레임 문자열을 엮을
+        # 이유가 없고, 이 핸들러는 Flask 스레드에서 폴링 주기로만 돈다.
+        if hasattr(driver, 'format_history'):
+            tel['decisions'] = driver.format_history()
+        return jsonify(tel)
 
     @app.route('/api/control', methods=['POST'])
     def api_control():

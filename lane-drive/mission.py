@@ -6,7 +6,7 @@
 
     mission = MissionManager()
     mission.observe(n, ctrl, det)       # loop.py 가 매 프레임 부른다
-    mission.status_str                  # 'RIGHT_SIGN — right_sign 면적 3120 >= 2500'
+    mission.status_str                  # 'RIGHT_SIGN — right_sign 면적 5100 >= 4200'
     mission.history                     # [(프레임, 이전, 이후, 사유), ...]
 
 세 조각으로 나뉜다.
@@ -41,9 +41,12 @@ y2 165~279) 매 프레임 `if 표지판이 보이면` 으로 짜면 사라지는
 STRAIGHT_N 으로는 영영 복귀하지 못한다. GONE 은 **진입시킨 그 종류**를 추적하므로
 흰 차량으로 들어갔으면 흰 차량이 사라질 때까지 유지된다.
 
-**방향(좌/우)은 아직 가르지 않는다.** `TRAFFIC_LIGHT` 는 red / left / right 를
-한 상태로 받는다. 실제로 좌회전이냐 우회전이냐를 읽어 기동을 시작하는 것은
-아직 이 모듈의 일이 아니다 (`crossroad_driver.start_turn()` 이 웹 버튼으로 받는다).
+**방향(좌/우)은 이 모듈이 가르지 않는다.** `TRAFFIC_LIGHT` 는 red / left / right
+를 한 상태로 받을 뿐이다. 실제로 어느 쪽으로 돌지는 `crossroad_driver` 가 정한다
+— 웹의 TURN 버튼과 `--auto-turn` 자동 트리거가 `start_turn(side)` 를 부른다.
+
+이 모듈이 주행에 관여하지 않는 것과 별개로, **`config.DETECTION_AREA_ENTER` 는
+`crossroad_driver` 도 함께 읽는다.** 임계값을 고치면 양쪽이 같이 움직인다.
 """
 import collections
 from dataclasses import dataclass, field
@@ -136,7 +139,7 @@ class Observation:
             # objects 를 빈 것으로 해석하면 안 된다 — 그러면 GONE 복귀가 거짓으로
             # 발동해 회피 도중에 상태가 풀린다. 진입도 하지 않고 GONE 카운터도
             # 세지 않도록 fresh=False 로 알린다.
-            objects_fresh=age_ms <= cfg.MISSION_MAX_AGE_MS,
+            objects_fresh=age_ms <= cfg.DETECTION_MAX_AGE_MS,
             link_ok=link_ok,
             age_ms=age_ms,
         )
@@ -164,7 +167,7 @@ class Intent:
 class MissionManager:
     def __init__(self, area_enter=None, return_frames=None, gone_frames=None,
                  timeout_frames=None):
-        self.area_enter = dict(area_enter or cfg.MISSION_AREA_ENTER)
+        self.area_enter = dict(area_enter or cfg.DETECTION_AREA_ENTER)
         self.return_frames = (cfg.MISSION_RETURN_FRAMES if return_frames is None
                               else return_frames)
         self.gone_frames = (cfg.MISSION_GONE_FRAMES if gone_frames is None

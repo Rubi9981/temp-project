@@ -13,7 +13,7 @@ def overlay(roi, y_start, res, ctrl, tel):
     """ROI 밴드 위에 주행 상태를 그린다.
 
     첫 인자는 **분석에 쓴 ROI 밴드**다 (전체 BEV 가 아니다). 위쪽 55%는
-    검출에 쓰지 않으므로 애초에 만들지 않는다 — driver.Driver.step 참조.
+    검출에 쓰지 않으므로 애초에 만들지 않는다 — driver.Driver.perceive 참조.
     다항식은 ROI 좌표계라 그대로 그리면 되고, ctrl.goal_bev 만 전체 BEV
     좌표라 y_start 만큼 올려서 찍는다.
 
@@ -61,11 +61,6 @@ def overlay(roi, y_start, res, ctrl, tel):
         color = ((0, 0, 255) if 'STOP' in sub or 'LOST' in sub or 'FAIL' in sub
                  else (0, 255, 0) if sub == 'LANE_FOLLOW' else (0, 165, 255))
         rows.insert(1, (f'STATE: {sub}', color))
-    # 미션 상태 기계 (--mission). 상태 이름만 — 사유는 웹 상태표에 나온다
-    if tel.get('mission', '-') != '-':
-        name = tel['mission'].split(' — ')[0]
-        rows.append((f'MISSION: {name}',
-                     (0, 0, 255) if name == 'HALT' else (255, 200, 0)))
     for i, (text, color) in enumerate(rows):
         y = 28 + i * 26
         cv2.putText(vis, text, (14, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)

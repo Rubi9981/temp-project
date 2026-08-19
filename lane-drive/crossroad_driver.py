@@ -1,7 +1,8 @@
-"""교차로 직진 주행 상태 기계.
+"""교차로 통과 · 좌우 회전 · 신호등/표지판 자동 반응 주행 상태 기계.
 
-차선이 끊긴 구간을 서보 중립으로 천천히 직진해 빠져나간다.
-`drive.py --crossroad` 로 켜며, 켜지 않으면 기존 `Driver` 가 그대로 쓰인다.
+차선이 끊긴 구간을 서보 중립으로 천천히 직진해 빠져나가고, 고정 조향 원호로
+좌/우 회전하며, 탐지한 객체에 따라 감속·정지·회전을 스스로 시작한다.
+**기본으로 켜져 있다** — `drive.py --no-crossroad` 를 주면 기존 `Driver` 가 쓰인다.
 
 **Driver 를 상속한다.** 인지(warp -> 이진화 -> 검출 -> Pure Pursuit)와 하드웨어
 출력(`apply_servo`/`apply_motor`/`set_mode`/`hw_lock`)은 부모 것을 그대로 쓰고,
@@ -14,7 +15,7 @@ AUTO 모드에서의 판단 순서:
     2. 회전 진행 중       start_turn() 으로 시작됨          -> 고정 조향 원호
     3. 정지 대상 객체     human (CROSSROAD_STOP_CLASSES)    -> 정지
     4. 자동 회전 트리거   화살표 / 표지판 면적              -> 회전 시작
-    5. 빨간불 면적 초과   MISSION_AREA_ENTER['red']         -> 정지 후 대기
+    5. 빨간불 면적 초과   DETECTION_AREA_ENTER['red']         -> 정지 후 대기
     6. ctrl.ok            차선 정상 (감속이 켜져 있으면 x0.5) -> Pure Pursuit
     7. 차선 없음 + 객체 없음                               -> 직진 (servo 90, 저속)
     8. 그 외              차선 없음 + 객체 있음            -> 기존 실패 처리
@@ -28,12 +29,13 @@ AUTO 모드에서의 판단 순서:
 4·5·6번의 자동 반응은 **기본으로 켜져 있다.** drive.py 의 --no-slow-on-sight /
 --no-red-stop / --no-auto-turn 으로 각각 끈다.
 
-**4번의 진입 조건이 "차선이 안 보임"이라는 점을 알고 써야 한다.** 차선 실종은
-교차로·급커브·반사광을 구분하지 못한다. obstacles/ 1046장(교차로가 없는
-데이터)으로 replay 하면 88프레임이 이 상태로 분류되는데, 이는 그 데이터의
+**7번(교차로 직진)의 진입 조건이 "차선이 안 보임"이라는 점을 알고 써야 한다.**
+차선 실종은 교차로·급커브·반사광을 구분하지 못한다. images/obstacles(교차로가
+없는 데이터)로 replay 하면 88프레임이 이 상태로 분류되는데, 이는 그 데이터의
 차선 검출 실패 수와 정확히 같다 — 즉 **검출 실패 전부가 교차로로 오인된다.**
-정지선 검출과 표지판 래치가 들어가면 그쪽을 진입 조건으로 옮겨야 한다.
+정지선 검출이 들어가면 그쪽을 진입 조건으로 옮겨야 한다.
 """
+import collections
 import math
 
 import config as cfg
@@ -58,9 +60,9 @@ class CrossroadDriver(Driver):
         self.slow_on_sight = slow_on_sight
         self.red_stop = red_stop
         self.auto_turn = auto_turn
-        # 면적 임계는 **MISSION_AREA_ENTER 를 그대로 읽는다.** 사용자가 실측해
+        # 면적 임계는 **DETECTION_AREA_ENTER 를 그대로 읽는다.** 사용자가 실측해
         # 넣은 값이고, 별도 상수를 두면 같은 물리량을 두 곳에서 튜닝하게 된다.
-        self.area_enter = dict(cfg.MISSION_AREA_ENTER)
+        self.area_enter = dict(cfg.DETECTION_AREA_ENTER)
         self.crossroad_speed = (cfg.CROSSROAD_SPEED if crossroad_speed is None
                                 else crossroad_speed)
         self.turn_speed = cfg.TURN_SPEED if turn_speed is None else turn_speed
@@ -68,6 +70,11 @@ class CrossroadDriver(Driver):
         self.stop_classes = set(stop_classes or cfg.CROSSROAD_STOP_CLASSES)
 
         self.sub_state = 'INIT'         # loop.py 가 상태표/HUD 에 그대로 띄운다
+        self.reason = '시작'            # 그 상태로 간 근거. 상태표에 함께 나간다
+        # 판단 이력. **화면의 sub_state 는 현재 프레임 한 줄뿐이라, 트랙에서
+        # 차가 이상하게 굴고 나서 보면 라벨이 이미 바뀌어 있다.** 무엇이 언제
+        # 왜 바뀌었는지는 여기에만 남는다.
+        self.history = collections.deque(maxlen=24)
         self.crossroad_frames = 0
         self.turn_side = None           # 'left' | 'right' | None(회전 아님)
         self.turn_start_n = 0
@@ -86,6 +93,30 @@ class CrossroadDriver(Driver):
                       '항상 타임아웃으로 끝납니다.')
         self.stats.update({'lane_follow': 0, 'crossroad': 0, 'object_stop': 0,
                            'turn': 0})
+
+    def _set_state(self, name, reason=''):
+        """판단 결과를 기록한다. 이름이 바뀔 때만 이력에 남긴다.
+
+        매 프레임 같은 상태를 다시 넣어도 이력이 더러워지지 않는다. 그래서
+        면적처럼 매 프레임 달라지는 값은 **이름이 아니라 reason 에** 넣는다 —
+        이름에 넣으면 프레임마다 새 전이로 잡힌다.
+        """
+        if name != self.sub_state:
+            self.history.append((self.stats['frames'], name, reason))
+        self.sub_state = name
+        self.reason = reason
+
+    @property
+    def status_str(self):
+        """상태표/HUD 에 나가는 한 줄. 상태와 근거를 함께 보여준다."""
+        return f'{self.sub_state} — {self.reason}' if self.reason else self.sub_state
+
+    def format_history(self):
+        """최근 판단 이력. 웹 화면과 종료 요약이 같은 것을 쓴다."""
+        if not self.history:
+            return '(판단 전이 없음)'
+        return '\n'.join(f'[{f:6d}] {name:18s} {why}'
+                         for f, name, why in self.history)
 
     def _turn_servo_table(self):
         """좌/우 회전에 쓸 서보값을 시작할 때 한 번만 계산한다.
@@ -129,7 +160,8 @@ class CrossroadDriver(Driver):
             self.crossroad_frames = 0
             self.turn_side = None       # 모드가 바뀌면 진행 중인 회전을 버린다
             self.turn_back_left = 0
-            self.sub_state = 'LANE_FOLLOW' if mode == 'AUTO' else mode
+            self._set_state('LANE_FOLLOW' if mode == 'AUTO' else mode,
+                            f'모드 전환 -> {mode}')
         return ok
 
     def start_turn(self, side, auto=False):
@@ -148,10 +180,11 @@ class CrossroadDriver(Driver):
         # **좌회전만 후진으로 시작한다.** 서보의 좌/우 가동각이 달라 좌회전
         # 반경이 크기 때문에, 물러나서 여유 거리를 만든 뒤 꺾는다.
         self.turn_back_left = cfg.TURN_BACK_FRAMES if side == 'left' else 0
-        self.sub_state = ('TURN_LEFT_BACK' if self.turn_back_left
-                          else f'TURN_{side.upper()}')
-        back = (f'후진 {self.turn_back_left}프레임 후 ' if self.turn_back_left else '')
         mn, to = self._turn_frames(side)
+        why = f"{'자동' if auto else '수동'} 트리거, servo {self.turn_servo[side]}"
+        self._set_state('TURN_LEFT_BACK' if self.turn_back_left
+                        else f'TURN_{side.upper()}', why)
+        back = (f'후진 {self.turn_back_left}프레임 후 ' if self.turn_back_left else '')
         print(f"  [회전] {side} 시작 ({'자동' if auto else '수동'}) — "
               f'{back}servo {self.turn_servo[side]}  최소 {mn} / 최대 {to}프레임')
         return True
@@ -160,7 +193,7 @@ class CrossroadDriver(Driver):
     # 자동 반응 (--slow-on-sight / --red-stop / --auto-turn)
     # -----------------------------
     def _areas(self):
-        """지금 보이는 것들의 {클래스: (면적, conf)}. mission.py 와 같은 함수를 쓴다."""
+        """지금 보이는 것들의 {클래스: (면적, conf)}. 면적이 곧 거리 대용이다."""
         return yolo.largest_area_by_class(getattr(self.det, 'boxes', None))
 
     def _slow_factor(self, areas):
@@ -172,7 +205,7 @@ class CrossroadDriver(Driver):
 
         화살표(left/right)가 표지판보다 우선한다 — 신호는 그 순간의 지시이고,
         표지판은 이미 지나온 구간의 안내일 수 있기 때문이다. 화살표는 면적을
-        보지 않고, 표지판은 MISSION_AREA_ENTER['right_sign'] 을 넘어야 한다.
+        보지 않고, 표지판은 DETECTION_AREA_ENTER['right_sign'] 을 넘어야 한다.
         """
         if self.stats['frames'] - self.turn_done_n < cfg.TURN_COOLDOWN_FRAMES:
             return None
@@ -208,7 +241,8 @@ class CrossroadDriver(Driver):
         if self.turn_back_left > 0:
             # 후진 단계. 조향은 중립으로 두고 곧게 물러난다.
             self.turn_back_left -= 1
-            self.sub_state = 'TURN_LEFT_BACK'
+            self._set_state('TURN_LEFT_BACK',
+                            f'좌회전 전 후진 {self.turn_back_left}프레임 남음')
             self.apply_servo(cfg.SERVO_CENTER)
             self.apply_motor(-self.turn_speed)
             if self.turn_back_left == 0:
@@ -222,7 +256,8 @@ class CrossroadDriver(Driver):
 
         # apply_servo 는 평활을 하지 않는다 (EMA 는 차선 추종 분기에서 계산된다).
         # 원호를 늦게 시작하면 반경이 커져 못 돌기 때문에 한 프레임에 넣는다.
-        self.sub_state = f'TURN_{self.turn_side.upper()}'
+        self._set_state(f'TURN_{self.turn_side.upper()}',
+                        f'servo {self.turn_servo[self.turn_side]} 고정')
         self.apply_servo(self.turn_servo[self.turn_side])
         self.apply_motor(self.turn_speed)
 
@@ -241,14 +276,15 @@ class CrossroadDriver(Driver):
             print(f'  [회전] {self.turn_side} 완료 — {held}프레임, 차선 재획득')
             self.turn_side = None
             self.turn_done_n = self.stats['frames']
-            self.sub_state = 'LANE_FOLLOW'
+            self._set_state('LANE_FOLLOW', f'회전 완료 — {held}프레임, 차선 재획득')
         elif held > timeout_frames:
             print(f'  [정지] 회전 {held}프레임 초과 — 차선을 못 잡았습니다')
             self.turn_side = None
             self.turn_done_n = self.stats['frames']
             self.stats['halt'] += 1
             self.stopped = True
-            self.sub_state = 'TURN_TIMEOUT'
+            self._set_state('TURN_TIMEOUT',
+                            f'{held}프레임 > {timeout_frames} — 차선 못 잡음')
             self.apply_motor(0)
 
     def _seen(self, classes):
@@ -261,12 +297,12 @@ class CrossroadDriver(Driver):
         ctrl, roi, res, y_start = self.perceive(frame)
 
         if self.mode == 'STOP':
-            self.sub_state = 'STOP'
+            self._set_state('STOP', '웹에서 STOP')
             self.apply_motor(0)
             return ctrl, roi, res, y_start
 
         if self.mode == 'MANUAL':
-            self.sub_state = 'MANUAL'
+            self._set_state('MANUAL', '수동 조종')
             return ctrl, roi, res, y_start
 
         # 원격 탐지 링크가 끊겼다. 객체 판단 자체를 믿을 수 없으므로
@@ -275,7 +311,7 @@ class CrossroadDriver(Driver):
             if not self.stopped:
                 self.stats['halt'] += 1
                 print('  [정지] 원격 탐지 링크 끊김')
-            self.sub_state = 'LINK_LOST'
+            self._set_state('LINK_LOST', '탐지 결과가 너무 묵음')
             self.stopped = True
             self.apply_motor(0)
             return ctrl, roi, res, y_start
@@ -288,7 +324,8 @@ class CrossroadDriver(Driver):
 
         stopper = self._seen(self.stop_classes)
         if stopper:
-            self.sub_state = f'STOP_{stopper[0].upper()}'
+            self._set_state(f'STOP_{stopper[0].upper()}',
+                            f'{stopper[0]} 탐지 (거리 게이트 없음)')
             self.stats['object_stop'] += 1
             self.apply_motor(0)
             self.apply_servo(cfg.SERVO_CENTER)
@@ -311,7 +348,10 @@ class CrossroadDriver(Driver):
         if self.red_stop:
             red = areas.get('red')
             if red and red[0] >= self.area_enter.get('red', float('inf')):
-                self.sub_state = f'STOP_RED_{int(red[0])}'
+                # 면적은 매 프레임 달라지므로 **이름이 아니라 근거에** 넣는다
+                self._set_state('STOP_RED',
+                                f'면적 {int(red[0])} >= '
+                                f'{int(self.area_enter["red"])} — 방향 신호 대기')
                 self.stats['object_stop'] += 1
                 self.stopped = True
                 self.apply_motor(0)
@@ -321,7 +361,11 @@ class CrossroadDriver(Driver):
         if ctrl.ok:
             # 감속은 **차선 추종에만** 건다. 교차로 직진과 회전은 자기 속도가 있다.
             slow = self._slow_factor(areas) if self.slow_on_sight else 1.0
-            self.sub_state = 'LANE_FOLLOW_SLOW' if slow < 1.0 else 'LANE_FOLLOW'
+            if slow < 1.0:
+                seen = ', '.join(c for c in cfg.SLOW_CLASSES if c in areas)
+                self._set_state('LANE_FOLLOW_SLOW', f'{seen} 보임 — 속도 x{slow:g}')
+            else:
+                self._set_state('LANE_FOLLOW', '차선 추종')
             self.stats['lane_follow'] += 1
             self.stats['ok'] += 1
             self.fail_streak = 0
@@ -340,7 +384,9 @@ class CrossroadDriver(Driver):
             self.fail_streak = 0
             if self.crossroad_frames > cfg.CROSSROAD_MAX_FRAMES:
                 # 이만큼 직진했는데도 차선이 안 잡히면 교차로가 아니었던 것이다
-                self.sub_state = 'CROSSROAD_TIMEOUT'
+                self._set_state('CROSSROAD_TIMEOUT',
+                                f'{self.crossroad_frames}프레임 > '
+                                f'{cfg.CROSSROAD_MAX_FRAMES} — 교차로가 아니었음')
                 if not self.stopped:
                     self.stats['halt'] += 1
                     print(f'  [정지] 교차로 직진 {self.crossroad_frames}프레임 초과')
@@ -348,7 +394,7 @@ class CrossroadDriver(Driver):
                 self.apply_motor(0)
                 return ctrl, roi, res, y_start
 
-            self.sub_state = 'CROSSROAD_STRAIGHT'
+            self._set_state('CROSSROAD_STRAIGHT', '차선 없음 + 대상 객체 없음')
             self.stats['crossroad'] += 1
             self.stopped = False
             # 중립으로 한 번에 꺾지 않고 EMA 로 밀어 넣는다 — 직전 조향이
@@ -362,14 +408,17 @@ class CrossroadDriver(Driver):
         self.stats['fail'] += 1
         self.fail_streak += 1
         if self.fail_streak >= self.max_fail:
-            self.sub_state = 'FAIL_SAFE'
+            self._set_state('FAIL_SAFE',
+                            f'연속 {self.fail_streak}프레임 검출 실패')
             if not self.stopped:
                 self.stats['halt'] += 1
                 print(f'  [정지] 연속 {self.fail_streak}프레임 검출 실패')
             self.stopped = True
             self.apply_motor(0)
         else:
-            self.sub_state = f'HOLD_{self.fail_streak}'
+            # 프레임 수는 이름이 아니라 근거에 — 매 프레임 새 전이가 되지 않게
+            self._set_state('HOLD', f'검출 실패 {self.fail_streak}/{self.max_fail}, '
+                                    '직전 조향 유지')
             self.apply_servo(self.servo_cmd)
             self.apply_motor(self.speed)
 

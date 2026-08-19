@@ -1,7 +1,15 @@
 """YOLOv8 객체 탐지.
 
-탐지 결과는 상태표에 표시하고, CrossroadDriver에서는 정지 대상 객체와
-교차로 직진 여부를 판단하는 데 사용한다.
+탐지 결과는 상태표에 표시하고, CrossroadDriver 가 정지 대상 객체·교차로 직진
+여부와 **감속 / 빨간불 정지 / 자동 회전**을 판단하는 데 사용한다.
+
+이 모듈은 추론기(Detector) 외에 결과 집계 함수도 제공한다 (파일 끝):
+
+    largest_area_by_class(boxes)  {클래스: (면적, conf)} — 면적이 거리 대용이다
+    summary_with_area(boxes)      'red 812 · right_sign 4310' — 상태표용
+
+mission.py 와 crossroad_driver.py 가 **같은 함수**를 쓴다. 두 곳이 다른 방식으로
+면적을 세면 config.DETECTION_AREA_ENTER 의 임계값이 서로 다른 뜻이 되기 때문이다.
 
     det = Detector(cfg.YOLO_MODEL_PATH, conf=0.25, imgsz=640)
     det.infer(frame)        # -> 'human 1, red 1'
@@ -176,7 +184,7 @@ def largest_area_by_class(boxes):
 def summary_with_area(boxes):
     """'red 812 · right_sign 4310' — 상태표에서 면적 임계를 눈으로 재기 위한 것.
 
-    config.MISSION_AREA_ENTER 를 다시 잴 때, 차를 원하는 거리에 놓고 이 숫자를
+    config.DETECTION_AREA_ENTER 를 다시 잴 때, 차를 원하는 거리에 놓고 이 숫자를
     읽으면 그대로 임계값이 된다.
     """
     areas = largest_area_by_class(boxes)
