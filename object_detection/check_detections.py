@@ -14,7 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "best_v7.pt"
 
 # 2) 탐지할 이미지가 들어있는 폴더 경로
-PHOTOS_DIR = BASE_DIR / "cars"
+PHOTOS_DIR = BASE_DIR / "right_sign"
 
 # 3) 객체 탐지 신뢰도(Confidence) 임계값
 CONF_THRESHOLD = 0.25
