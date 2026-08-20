@@ -10,7 +10,8 @@
 
 부호: Y, alpha, kappa, delta 모두 **좌선회가 +**.
 서보는 왼쪽이 작은 값(raspi/L_5_Capture.py: ArrowLeft -> 40)이므로
-servo = 90 - delta_deg * SERVO_PER_DEG 가 된다.
+servo = 90 - delta_deg * (서보단위/도) 가 된다. **좌우 계수가 다르다** —
+링키지가 비대칭이라 좌선회에는 SERVO_LEFT_RATIO 를 곱한다 (servo() 참조).
 
 프레임 독립 순수 함수로 짰다 — 나중에 Pi 실시간 루프에 그대로 물릴 수 있다.
 """
@@ -38,12 +39,14 @@ class ControlResult:
 
 class PurePursuit:
     def __init__(self, metric=None, lookahead_cm=None, wheelbase_cm=None,
-                 max_steer_deg=None, servo_per_deg=None):
+                 max_steer_deg=None, servo_per_deg=None, left_ratio=None):
         self.m = metric if metric is not None else cfg.get_metric()
         self.lookahead_cm = lookahead_cm or cfg.LOOKAHEAD_CM
         self.wheelbase_cm = wheelbase_cm or self.m.wheelbase_cm
         self.max_steer_deg = max_steer_deg or cfg.MAX_STEER_DEG
         self.servo_per_deg = servo_per_deg or cfg.SERVO_PER_DEG
+        # 좌측 링키지 보정. 우측 기준 계수에 이걸 곱해 좌선회에만 쓴다.
+        self.left_ratio = left_ratio or cfg.SERVO_LEFT_RATIO
 
     # -----------------------------
     # 1) 목표점 찾기
@@ -96,8 +99,15 @@ class PurePursuit:
         return float(np.clip(delta, -self.max_steer_deg, self.max_steer_deg))
 
     def servo(self, delta_deg):
-        """좌선회(delta>0)가 작은 서보값이 되도록 부호를 뒤집는다."""
-        value = cfg.SERVO_CENTER - delta_deg * self.servo_per_deg
+        """조향각(deg) -> 서보 명령. 좌선회(delta>0)가 작은 서보값이 된다.
+
+        **좌우 계수가 다르다.** 실측상 같은 28도를 만드는 데 우측은 중립에서
+        60단위(servo 150), 좌측은 80단위(servo 10)가 든다. 하나의 계수를 양쪽에
+        쓰면 좌선회 28도가 servo 30 으로 나가고, 그건 좌측 60단위라 실제로는
+        21도밖에 안 꺾인다 — 좌회전 반경이 우측보다 8cm 커지는 원인이었다.
+        """
+        per_deg = self.servo_per_deg * (self.left_ratio if delta_deg > 0 else 1.0)
+        value = cfg.SERVO_CENTER - delta_deg * per_deg
         return int(round(float(np.clip(value, cfg.SERVO_MIN, cfg.SERVO_MAX))))
 
     # -----------------------------

@@ -87,8 +87,12 @@ def overlay(roi, y_start, res, ctrl, tel):
     cx, gy = w // 2, h - 22
     cv2.line(vis, (cx - 100, gy), (cx + 100, gy), (90, 90, 90), 3)
     cv2.line(vis, (cx, gy - 7), (cx, gy + 7), (150, 150, 150), 2)
-    span = (cfg.SERVO_MAX - cfg.SERVO_MIN) / 2.0
-    offset = int((tel['servo'] - cfg.SERVO_CENTER) * (100.0 / span))
+    # 서보 가동폭이 좌우 비대칭이라(좌 80 / 우 60단위) 한쪽 폭으로 나누면
+    # 게이지가 한쪽으로 치우친다. 각 방향의 실제 폭으로 정규화한다.
+    delta_servo = tel['servo'] - cfg.SERVO_CENTER
+    span = ((cfg.SERVO_CENTER - cfg.SERVO_MIN) if delta_servo < 0
+            else (cfg.SERVO_MAX - cfg.SERVO_CENTER))
+    offset = int(delta_servo * (100.0 / max(span, 1e-6)))
     offset = int(np.clip(offset, -100, 100))
     cv2.circle(vis, (cx + offset, gy), 9, (0, 0, 0), -1)
     cv2.circle(vis, (cx + offset, gy), 7, (0, 255, 0), -1)

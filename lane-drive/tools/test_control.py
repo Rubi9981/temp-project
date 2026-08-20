@@ -158,8 +158,19 @@ check('right_curve 의 목표점이 실제로 오른쪽(Y<0)', goal_r[1] < 0, f'
 out_r = PP(detect.LaneResult(status='ok', fit_center=right_curve), ROI_H, Y_START)
 check('우향 곡선 -> 우선회 (servo > 90)', out_r.servo > cfg.SERVO_CENTER,
       f'servo={out_r.servo} delta={out_r.delta_deg:+.2f}')
-check('좌우 곡선 대칭', out_l.servo + out_r.servo == 2 * cfg.SERVO_CENTER,
-      f'{out_l.servo} + {out_r.servo}')
+# **서보값은 좌우 대칭이 아니다** — 링키지가 비대칭이라 좌선회에
+# SERVO_LEFT_RATIO 가 곱해진다. 대칭인 것은 그 앞 단계인 조향각이다.
+check('좌우 곡선의 조향각은 대칭', close(out_l.delta_deg, -out_r.delta_deg, 1e-6),
+      f'{out_l.delta_deg:+.3f} vs {out_r.delta_deg:+.3f}')
+check('같은 조향각이면 좌측 서보가 더 많이 움직인다',
+      (cfg.SERVO_CENTER - PP.servo(20.0)) > (PP.servo(-20.0) - cfg.SERVO_CENTER),
+      f'좌 {cfg.SERVO_CENTER - PP.servo(20.0)}단위 vs '
+      f'우 {PP.servo(-20.0) - cfg.SERVO_CENTER}단위')
+check('좌측 비율이 실측값과 맞는가',
+      close((cfg.SERVO_CENTER - PP.servo(cfg.MAX_STEER_DEG))
+            / (PP.servo(-cfg.MAX_STEER_DEG) - cfg.SERVO_CENTER),
+            cfg.SERVO_LEFT_RATIO, 0.02),
+      f'{(cfg.SERVO_CENTER - PP.servo(cfg.MAX_STEER_DEG)) / (PP.servo(-cfg.MAX_STEER_DEG) - cfg.SERVO_CENTER):.3f}')
 
 # 중심선이 없으면 ok=False
 check('중심선 없으면 ok=False',
