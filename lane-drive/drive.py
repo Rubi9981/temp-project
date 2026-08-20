@@ -90,7 +90,7 @@ def main():
     # 면적 임계는 config.DETECTION_AREA_ENTER 를 그대로 읽는다.
     ap.add_argument('--no-slow-on-sight', dest='slow_on_sight', action='store_false',
                     help=f'{"/".join(cfg.SLOW_CLASSES)} 가 보일 때의 감속'
-                         f'(x{cfg.SLOW_FACTOR:g})을 끈다')
+                         f'(속도 {cfg.SLOW_SPEED})을 끈다')
     ap.add_argument('--no-red-stop', dest='red_stop', action='store_false',
                     help=f'red 면적 {cfg.DETECTION_AREA_ENTER["red"]} 초과 시 정지를 끈다')
     ap.add_argument('--avoid-speed', type=int, default=cfg.AVOID_SPEED,

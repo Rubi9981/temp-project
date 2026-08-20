@@ -244,7 +244,8 @@ YOLO_WATCHDOG_MS = 2000
 #     CROSSROAD_SPEED  차선이 끊긴 교차로를 직진 통과할 때
 #     TURN_SPEED       좌/우 회전 기동 중 (후진도 이 값을 뒤집어 쓴다)
 #     AVOID_SPEED      정적 장애물 회피 중
-#     SLOW_FACTOR      red / right_sign 이 보일 때 DRIVE_SPEED 에 곱한다
+#     SLOW_SPEED       red / right_sign 이 보일 때 (곱이 아니라 절대값)
+#     CAR_SLOW_SPEED   앞의 모형 차량이 가까워졌을 때 (곱이 아니라 절대값)
 
 # 차선 추종 기본 속도. drive.py 는 --speed 를 명시해야 0 이 아니다.
 DRIVE_SPEED = 100        # afb1.gpio.motor() 값. raspi/L_6_CNN.py 가 주행에 쓰던 값
@@ -262,9 +263,25 @@ TURN_SPEED = 50
 # 반대로 장애물 옆에 머무는 시간도 길어지므로, AVOID_OFFSET_PX 와 함께 맞춘다.
 AVOID_SPEED = 50
 
-# SLOW_CLASSES 가 보일 때 차선 추종 속도에 곱한다 (--no-slow-on-sight 로 끈다).
+# SLOW_CLASSES 가 보일 때의 차선 추종 속도 (--no-slow-on-sight 로 끈다).
 # **차선 추종에만 걸린다** — 교차로 직진·회전·회피는 자기 속도를 그대로 쓴다.
-SLOW_FACTOR = 0.5
+#
+# **배율이 아니라 절대값이다.** 예전에는 DRIVE_SPEED 에 0.5 를 곱했는데, 그러면
+# --speed 를 만질 때마다 감속 속도가 함께 따라가 실제로 얼마로 느려지는지가
+# 계산해야 아는 값이었다. 다른 상황 속도(CROSSROAD/TURN/AVOID_SPEED)와 같은
+# 방식으로 읽히도록 속도 자체를 적는다.
+#
+# --speed 가 이미 이보다 느리면 **올리지 않는다** — 감속 조건이 속도를 높이는
+# 일은 없어야 한다.
+SLOW_SPEED = 50
+
+# 모형 차량(AVOID_SIDE 의 클래스)이 CAR_SLOW_AREA 를 넘으면 이 속도로 줄인다.
+# **배율이 아니라 절대값이다** — 회피를 시작하는 속도(AVOID_SPEED)와 같은 값을
+# 미리 잡아 두어야, 감속 -> 회피로 넘어갈 때 속도가 튀지 않는다.
+#
+# SLOW_SPEED 와 겹치면 **둘 중 느린 쪽**을 쓴다. 빨간불이 함께 보이는데
+# 앞차 때문에 도로 빨라지면 안 되기 때문이다.
+CAR_SLOW_SPEED = 50
 
 
 # ==============================================================================
@@ -411,6 +428,7 @@ TURN_COOLDOWN_FRAMES = 90
 #     DETECTION_AREA_ENTER['right_sign']  이만큼 커지면 우회전  (--auto-turn)
 #     DETECTION_AREA_ENTER['left'/'right']  이만큼 커지면 회전  (--auto-turn)
 #     SLOW_CLASSES                      보이기만 하면 감속    (면적 무관)
+#     CAR_SLOW_AREA                     앞차가 이만큼 커지면 감속
 #     CROSSROAD_STOP_CLASSES            보이기만 하면 정지    (면적 무관)
 
 # 클래스별 면적 임계. 트랙 반대편에 작게 잡힌 표지판에 반응하지 않게 하는 것이
@@ -431,9 +449,15 @@ DETECTION_AREA_ENTER = {
     'car_white': 5000,
 }
 
-# 이 중 하나라도 **보이기만 하면** 차선 추종 속도를 SLOW_FACTOR 배로 줄인다.
+# 이 중 하나라도 **보이기만 하면** 차선 추종 속도를 SLOW_SPEED 로 줄인다.
 # 면적을 보지 않는다 — 멀리 보이는 단계에서 미리 느려지는 것이 목적이다.
 SLOW_CLASSES = ['red', 'right_sign']
+
+# 모형 차량(AVOID_SIDE 의 클래스)이 이만큼 커지면 CAR_SLOW_SPEED 로 줄인다.
+# **회피 임계(DETECTION_AREA_ENTER['car_*'] = 5000)보다 작아야 한다** — 회피를
+# 시작하기 전에 먼저 느려지는 것이 목적이고, 같거나 크면 감속과 회피가 같은
+# 프레임에 걸려 감속 단계가 없는 것과 같아진다.
+CAR_SLOW_AREA = 3000
 
 # 방향 신호 클래스 -> 회전 방향. **면적은 위 DETECTION_AREA_ENTER 를 쓴다.**
 #

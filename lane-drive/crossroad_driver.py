@@ -212,9 +212,22 @@ class CrossroadDriver(Driver):
         """지금 보이는 것들의 {클래스: (면적, conf)}. 면적이 곧 거리 대용이다."""
         return yolo.largest_area_by_class(getattr(self.det, 'boxes', None))
 
-    def _slow_factor(self, areas):
-        """SLOW_CLASSES 중 하나라도 **보이면** SLOW_FACTOR. 면적은 보지 않는다."""
-        return cfg.SLOW_FACTOR if any(c in areas for c in cfg.SLOW_CLASSES) else 1.0
+    def _slow_seen(self, areas):
+        """SLOW_CLASSES 중 지금 **보이는** 것들. 면적은 보지 않는다."""
+        return [c for c in cfg.SLOW_CLASSES if c in areas]
+
+    def _car_slow(self, areas):
+        """앞의 모형 차량이 CAR_SLOW_AREA 를 넘었으면 (클래스, 면적). 없으면 None.
+
+        회피(_avoid_side)와 같은 클래스를 보되 임계만 낮다 — 피하기 전에 먼저
+        느려지는 단계다. 둘 다 넘으면 면적이 큰 쪽(더 가까운 쪽)을 보고한다.
+        """
+        hits = [(areas[c][0], c) for c in cfg.AVOID_SIDE
+                if c in areas and areas[c][0] >= cfg.CAR_SLOW_AREA]
+        if not hits:
+            return None
+        area, name = max(hits)
+        return name, area
 
     def _avoid_side(self, areas):
         """회피 방향. 없으면 None.
@@ -234,7 +247,7 @@ class CrossroadDriver(Driver):
         요점이다 — 곡선 구간에서도 도로를 벗어나지 않는다. detect.py 가 한쪽
         차선만 잡혔을 때 쓰는 "상수항만 밀기"와 같은 기법이다.
 
-        속도는 AVOID_SPEED 를 쓴다 — 감속 배율(SLOW_FACTOR)은 걸지 않는다.
+        속도는 AVOID_SPEED 를 쓴다 — 감속(SLOW_SPEED)은 걸지 않는다.
         교차로 직진·회전과 같은 규약이다.
 
         **복귀는 시간으로만 판정한다.** AVOID_FRAMES 가 지나면 차선을 잡았든
@@ -464,13 +477,22 @@ class CrossroadDriver(Driver):
                 return ctrl, roi, res, y_start
 
         if ctrl.ok:
-            # 감속은 **차선 추종에만** 건다. 교차로 직진과 회전은 자기 속도가 있다.
-            slow = self._slow_factor(areas) if self.slow_on_sight else 1.0
-            if slow < 1.0:
-                seen = ', '.join(c for c in cfg.SLOW_CLASSES if c in areas)
-                self._set_state('LANE_FOLLOW_SLOW', f'{seen} 보임 — 속도 x{slow:g}')
-            else:
-                self._set_state('LANE_FOLLOW', '차선 추종')
+            # 감속은 **차선 추종에만** 건다. 교차로 직진과 회전은 자기 속도가
+            # 있다. 값은 배율이 아니라 **절대 속도**이고, 조건이 여러 개 걸리면
+            # 차례로 더 느린 값만 취한다 — 감속 조건이 속도를 올리지는 않는다.
+            speed, state, reason = self.speed, 'LANE_FOLLOW', '차선 추종'
+            seen = self._slow_seen(areas) if self.slow_on_sight else []
+            car = self._car_slow(areas) if self.slow_on_sight else None
+            if seen and cfg.SLOW_SPEED < speed:
+                speed = cfg.SLOW_SPEED
+                state = 'LANE_FOLLOW_SLOW'
+                reason = f'{", ".join(seen)} 보임 — 속도 {speed}'
+            if car is not None and cfg.CAR_SLOW_SPEED < speed:
+                speed = cfg.CAR_SLOW_SPEED
+                state = 'LANE_FOLLOW_SLOW'
+                reason = (f'{car[0]} 면적 {int(car[1])} >= '
+                          f'{cfg.CAR_SLOW_AREA} — 속도 {speed}')
+            self._set_state(state, reason)
             self.stats['lane_follow'] += 1
             self.stats['ok'] += 1
             self.fail_streak = 0
@@ -484,7 +506,7 @@ class CrossroadDriver(Driver):
                 # 매핑은 그 뒤에 한 번만 태운다.
                 target = self.pp.servo(-ctrl.delta_deg)
             self.apply_servo(self.servo_cmd + self.alpha * (target - self.servo_cmd))
-            self.apply_motor(int(round(self.speed * slow)))
+            self.apply_motor(speed)
             return ctrl, roi, res, y_start
 
         # 차선이 없는데 대상 객체도 안 보인다 -> 교차로로 보고 직진한다
