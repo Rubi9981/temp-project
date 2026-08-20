@@ -129,7 +129,11 @@ class Driver:
             # 지수이동평균으로 프레임 간 튀는 명령을 완화한다
             target = ctrl.servo
             if self.invert_servo:
-                target = 2 * cfg.SERVO_CENTER - target
+                # **서보값을 반사하면 안 된다.** 좌우 단위당 각도가 달라
+                # (SERVO_LEFT_RATIO) 2*90-servo 는 최대각에서만 맞고 중간
+                # 각도에서 최대 7도까지 어긋난다. 뒤집을 것은 **조향각**이고,
+                # 매핑은 그 뒤에 한 번만 태운다.
+                target = self.pp.servo(-ctrl.delta_deg)
             smoothed = self.servo_cmd + self.alpha * (target - self.servo_cmd)
             self.apply_servo(smoothed)
             self.apply_motor(self.speed)

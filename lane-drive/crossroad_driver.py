@@ -135,12 +135,14 @@ class CrossroadDriver(Driver):
             # 차량 좌표는 좌측이 + 다 (bev.bev_to_vehicle 참조)
             Y = sign * cfg.TURN_OFFSET_PX / px_per_cm_x
             X = math.sqrt(max(cfg.LOOKAHEAD_CM ** 2 - Y * Y, 1e-9))
-            value = self.pp.servo(self.pp.steer_angle(self.pp.curvature(X, Y)))
+            delta = self.pp.steer_angle(self.pp.curvature(X, Y))
             if self.invert_servo:
                 # 차선 추종 경로가 하는 것과 같은 뒤집기. 빠뜨리면 "직진은
                 # 맞는데 회전만 반대로 도는" 증상이 나온다.
-                value = 2 * cfg.SERVO_CENTER - value
-            table[side] = int(value)
+                # **각도를 뒤집고 매핑한다** — 서보값을 반사하면 좌우 비대칭
+                # 때문에 각도가 틀어진다 (servo() docstring 참조).
+                delta = -delta
+            table[side] = int(self.pp.servo(delta))
         return table
 
     def _turn_frames(self, side):
@@ -373,7 +375,11 @@ class CrossroadDriver(Driver):
             self.stopped = False
             target = ctrl.servo
             if self.invert_servo:
-                target = 2 * cfg.SERVO_CENTER - target
+                # **서보값을 반사하면 안 된다.** 좌우 단위당 각도가 달라
+                # (SERVO_LEFT_RATIO) 2*90-servo 는 최대각에서만 맞고 중간
+                # 각도에서 최대 7도까지 어긋난다. 뒤집을 것은 **조향각**이고,
+                # 매핑은 그 뒤에 한 번만 태운다.
+                target = self.pp.servo(-ctrl.delta_deg)
             self.apply_servo(self.servo_cmd + self.alpha * (target - self.servo_cmd))
             self.apply_motor(int(round(self.speed * slow)))
             return ctrl, roi, res, y_start

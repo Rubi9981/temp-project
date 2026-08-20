@@ -105,7 +105,8 @@ def main():
     ap.add_argument('--invert-servo', action='store_true',
                     help='서보가 반대로 돌 때. --dry-run 으로 확인 후 사용')
     ap.add_argument('--steer-gain', type=float, default=cfg.SERVO_PER_DEG,
-                    help='서보단위/바퀴각(deg). 조향이 과하면 줄이고 모자라면 키운다')
+                    help='서보단위/바퀴각(deg), **우측 기준**. 조향이 과하면 줄이고 '
+                         '모자라면 키운다. 좌측은 SERVO_LEFT_RATIO 가 곱해져 따라온다')
     ap.add_argument('--center-offset', type=float, default=0.0,
                     help='BEV상 차량 중심선 보정(px). + 면 좌선회를 더 한다 '
                          '= 차가 오른쪽으로 쏠릴 때 쓴다')
