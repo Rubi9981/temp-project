@@ -93,8 +93,9 @@ def main():
     ap.add_argument('--no-red-stop', dest='red_stop', action='store_false',
                     help=f'red 면적 {cfg.DETECTION_AREA_ENTER["red"]} 초과 시 정지를 끈다')
     ap.add_argument('--no-auto-turn', dest='auto_turn', action='store_false',
-                    help='방향 신호/표지판 자동 회전을 끈다 '
-                         '(웹의 TURN 버튼은 그대로 동작한다)')
+                    help=f'방향 신호(면적 {cfg.DETECTION_AREA_ENTER["left"]}) / '
+                         f'표지판(면적 {cfg.DETECTION_AREA_ENTER["right_sign"]}) '
+                         '자동 회전을 끈다 (웹의 TURN 버튼은 그대로 동작한다)')
     # 디버그 화면
     ap.add_argument('--no-web', action='store_true', help='웹 대시보드 끄기')
     ap.add_argument('--port', type=int, default=5000)

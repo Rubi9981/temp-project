@@ -14,7 +14,7 @@ AUTO 모드에서의 판단 순서:
     1. link_halt          원격 탐지 링크가 끊김            -> 정지
     2. 회전 진행 중       start_turn() 으로 시작됨          -> 고정 조향 원호
     3. 정지 대상 객체     human (CROSSROAD_STOP_CLASSES)    -> 정지
-    4. 자동 회전 트리거   화살표 / 표지판 면적              -> 회전 시작
+    4. 자동 회전 트리거   화살표·표지판 면적 >= 임계        -> 회전 시작
     5. 빨간불 면적 초과   DETECTION_AREA_ENTER['red']         -> 정지 후 대기
     6. ctrl.ok            차선 정상 (감속이 켜져 있으면 x0.5) -> Pure Pursuit
     7. 차선 없음 + 객체 없음                               -> 직진 (servo 90, 저속)
@@ -211,14 +211,20 @@ class CrossroadDriver(Driver):
         """자동 회전 방향. 없으면 None.
 
         화살표(left/right)가 표지판보다 우선한다 — 신호는 그 순간의 지시이고,
-        표지판은 이미 지나온 구간의 안내일 수 있기 때문이다. 화살표는 면적을
-        보지 않고, 표지판은 DETECTION_AREA_ENTER['right_sign'] 을 넘어야 한다.
+        표지판은 이미 지나온 구간의 안내일 수 있기 때문이다.
+
+        **셋 다 DETECTION_AREA_ENTER 를 넘어야 한다.** 예전에는 화살표에만
+        게이트가 없어서, conf 0.26 짜리 면적 205 단발 오탐 하나에 차가 즉시
+        돌아버렸다. images/obstacles 1048장에서 right 의 연속 구간 9개 중
+        7개가 1~2프레임짜리 깜빡임이었고(진짜는 60프레임), 그 하나하나가
+        회전 명령이었다.
         """
         if self.stats['frames'] - self.turn_done_n < cfg.TURN_COOLDOWN_FRAMES:
             return None
         # left 와 right 가 동시에 잡히면 conf 가 높은 쪽. 동전 던지기를 피한다.
         arrows = [(areas[c][1], side) for c, side in cfg.ARROW_TURN.items()
-                  if c in areas]
+                  if c in areas
+                  and areas[c][0] >= self.area_enter.get(c, float('inf'))]
         if arrows:
             return max(arrows)[1]
         sign = areas.get('right_sign')

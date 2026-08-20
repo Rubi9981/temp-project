@@ -356,8 +356,8 @@ TURN_COOLDOWN_FRAMES = 90
 #
 #     DETECTION_AREA_ENTER['red']         이만큼 커지면 정지    (--red-stop)
 #     DETECTION_AREA_ENTER['right_sign']  이만큼 커지면 우회전  (--auto-turn)
+#     DETECTION_AREA_ENTER['left'/'right']  이만큼 커지면 회전  (--auto-turn)
 #     SLOW_CLASSES                      보이기만 하면 감속    (면적 무관)
-#     ARROW_TURN                        보이기만 하면 회전    (면적 무관)
 #     CROSSROAD_STOP_CLASSES            보이기만 하면 정지    (면적 무관)
 
 # 클래스별 면적 임계. 트랙 반대편에 작게 잡힌 표지판에 반응하지 않게 하는 것이
@@ -382,9 +382,12 @@ DETECTION_AREA_ENTER = {
 # 면적을 보지 않는다 — 멀리 보이는 단계에서 미리 느려지는 것이 목적이다.
 SLOW_CLASSES = ['red', 'right_sign']
 
-# 방향 신호 클래스 -> 회전 방향. **면적 게이트가 없다** — 잡히는 순간 돈다.
-# 측정상 화살표는 면적 500~1800 에서 이미 conf 0.83~0.94 로 잡히므로 꽤 멀리서도
-# 보인다. 너무 일찍 도는 것이 확인되면 여기에 면적 임계를 붙일 것.
+# 방향 신호 클래스 -> 회전 방향. **면적은 위 DETECTION_AREA_ENTER 를 쓴다.**
+#
+# 예전에는 화살표에만 게이트가 없어 잡히는 순간 돌았는데, 그게 "표지판이 멀리
+# 있는데 갑자기 우회전" 의 원인이었다. images/obstacles 1048장에서 right 는
+# 면적 205 / conf 0.26 짜리로도 뜨고, 연속 구간 9개 중 7개가 1~2프레임짜리
+# 깜빡임이다 (진짜 신호는 60프레임 연속). 그 단발 하나가 곧 회전 명령이었다.
 ARROW_TURN = {'left': 'left', 'right': 'right'}
 
 # 이 중 하나라도 보이면 즉시 모터를 세운다. **지금은 사람만 세운다.**
