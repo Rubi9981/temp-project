@@ -241,10 +241,18 @@ class CrossroadDriver(Driver):
         아니든 차선 추종으로 돌아간다. 예전에는 피하는 쪽 차선이 연속으로
         잡히기를 기다렸는데, 회피 구간에서 차선 인식이 잘 안 돼 그 조건이
         성립하지 않았다.
+
+        기동은 두 단계다. AVOID_FRAMES 동안 피하는 쪽으로 밀고, 이어서
+        AVOID_RECOVER_FRAMES 동안 **반대쪽으로 같은 양을 밀어** 옆으로 기운
+        차체를 도로와 나란히 되돌린다. 뒤 단계가 짧으므로 각도만 돌아오고
+        옆으로 나간 거리는 남는다.
         """
         self.stats['avoid'] += 1
         held = self.stats['frames'] - self.avoid_start_n
         sign = +1.0 if self.avoid_side == 'right' else -1.0
+        recovering = held >= cfg.AVOID_FRAMES
+        if recovering:
+            sign = -sign
 
         if res.fit_center is not None:
             # BEV x 는 오른쪽으로 증가한다. 상수항만 더하면 평행이동이다.
@@ -265,10 +273,15 @@ class CrossroadDriver(Driver):
         # 속도가 또 절반이 되면 기동이 두 배로 길어진다.
         self.apply_motor(self.avoid_speed)
 
-        if held >= cfg.AVOID_FRAMES:
+        if held >= cfg.AVOID_FRAMES + cfg.AVOID_RECOVER_FRAMES:
             print(f'  [회피] {self.avoid_side} 완료 — {held}프레임')
             self.avoid_side = None
             self._set_state('LANE_FOLLOW', f'회피 {held}프레임 완료')
+        elif recovering:
+            self._set_state(f'AVOID_BACK_{self.avoid_side.upper()}',
+                            f'중심선 {sign * cfg.AVOID_OFFSET_PX:+.0f}px, '
+                            f'{held - cfg.AVOID_FRAMES}/'
+                            f'{cfg.AVOID_RECOVER_FRAMES}프레임')
         else:
             self._set_state(f'AVOID_{self.avoid_side.upper()}',
                             f'중심선 {sign * cfg.AVOID_OFFSET_PX:+.0f}px, '
