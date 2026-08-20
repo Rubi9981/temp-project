@@ -6,7 +6,7 @@
 
 왼쪽은 원본 카메라 이미지(추종점을 역투영해 얹은 것), 오른쪽은 BEV 다.
 
-**추종점은 옆으로만 미는 것이 아니다.** crossroad_driver._turn_servo_table() 은
+**추종점은 옆으로만 미는 것이 아니다.** crossroad_driver._servo_table() 은
 뒤축에서의 **방사 거리를 L_d 로 유지**한 채 옆으로 민다:
 
     Y = ±N / px_per_cm_x
@@ -41,7 +41,9 @@ _COLORS = [(0, 255, 255), (0, 200, 255), (0, 150, 255), (0, 100, 255),
 def goal_for_offset(offset_px, side, metric):
     """오프셋 -> (차량좌표 X, Y, kappa, delta, servo, 반경).
 
-    crossroad_driver._turn_servo_table() 과 같은 식을 쓴다.
+    crossroad_driver._servo_table() 과 같은 식을 쓴다.
+    회전(TURN_OFFSET_PX)과 회피(AVOID_OFFSET_PX)가 같은 식을 쓰므로, 회피
+    오프셋도 --offsets 로 그대로 넣어 보면 된다.
     """
     pp = control.PurePursuit(metric=metric)
     sign = +1.0 if side == 'left' else -1.0

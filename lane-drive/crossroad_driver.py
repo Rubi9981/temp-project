@@ -41,7 +41,6 @@ import collections
 import math
 
 import config as cfg
-import detect
 import yolo
 from driver import Driver
 
@@ -96,7 +95,8 @@ class CrossroadDriver(Driver):
         # 오른쪽 회피 직후에도 왼쪽 회피는 즉시 걸려야 한다.
         self.avoid_done_n = {'left': -cfg.AVOID_COOLDOWN_FRAMES,
                              'right': -cfg.AVOID_COOLDOWN_FRAMES}
-        self.turn_servo = self._turn_servo_table()
+        self.turn_servo = self._servo_table(cfg.TURN_OFFSET_PX)
+        self.avoid_servo = self._servo_table(cfg.AVOID_OFFSET_PX)
         for side in ('left', 'right'):
             mn, to = self._turn_frames(side)
             if to <= mn:
@@ -136,22 +136,27 @@ class CrossroadDriver(Driver):
         return '\n'.join(f'[{f:6d}] {name:18s} {why}'
                          for f, name, why in rows)
 
-    def _turn_servo_table(self):
-        """좌/우 회전에 쓸 서보값을 시작할 때 한 번만 계산한다.
+    def _servo_table(self, offset_px):
+        """전방에 목표점을 **만들어** 넣고 나오는 좌/우 고정 서보값.
 
-        차선이 없으면 밀 중심선 자체가 없으므로 목표점을 **만들어** 넣는다.
-        전방 LOOKAHEAD_CM 지점에서 옆으로 TURN_OFFSET_PX 만큼 민 점이고,
-        결과는 곡률이 고정된 원호다.
+        시작할 때 한 번만 계산한다. 전방 LOOKAHEAD_CM 지점에서 옆으로
+        offset_px 만큼 민 점이고, 결과는 곡률이 고정된 원호다. **차선 인식이
+        전혀 들어가지 않는다** — 회전(TURN_OFFSET_PX)과 회피(AVOID_OFFSET_PX)
+        가 함께 쓰는 이유가 그것이다. 차선이 끊기거나 한쪽만 잡혀 외삽된
+        중심선이 나오는 구간에서도 명령이 흔들리지 않는다.
 
-        Pure Pursuit 을 거치는 이유는 나중에 TURN_OFFSET_PX 를 실측 거리로
-        바꾸는 것이 한 줄이 되게 하기 위해서다. 기본값(260px)에서는 최대
-        조향으로 포화하므로 servo 는 좌 30 / 우 150 이 된다.
+        Pure Pursuit 을 거치는 이유는 나중에 오프셋을 실측 거리로 바꾸는 것이
+        한 줄이 되게 하기 위해서다. TURN_OFFSET_PX 기본값(260px)에서는 최대
+        조향(MAX_STEER_DEG)으로 포화한다 — 지금 설정에서 servo 좌 10 / 우 150,
+        AVOID_OFFSET_PX(150px)는 포화 전이라 좌 33 / 우 132 다. **좌우 값이
+        대칭이 아니다** — 같은 각도라도 좌측 링키지 보정(SERVO_LEFT_RATIO)이
+        붙기 때문이라, 반대 방향이 필요하면 표에서 꺼내 쓴다.
         """
         table = {}
         px_per_cm_x = self.pp.m.px_per_cm_x
         for side, sign in (('left', +1.0), ('right', -1.0)):
             # 차량 좌표는 좌측이 + 다 (bev.bev_to_vehicle 참조)
-            Y = sign * cfg.TURN_OFFSET_PX / px_per_cm_x
+            Y = sign * offset_px / px_per_cm_x
             X = math.sqrt(max(cfg.LOOKAHEAD_CM ** 2 - Y * Y, 1e-9))
             delta = self.pp.steer_angle(self.pp.curvature(X, Y))
             if self.invert_servo:
@@ -260,50 +265,42 @@ class CrossroadDriver(Driver):
                 if c in areas and areas[c][0] >= self.area_enter.get(c, float('inf'))]
         return max(hits)[1] if hits else None
 
-    def _step_avoid(self, ctrl, res):
-        """회피 중 한 프레임. 중심선을 옆으로 밀어 Pure Pursuit 을 다시 태운다.
+    def _step_avoid(self):
+        """회피 중 한 프레임. **차선을 보지 않고** 서보를 고정한다.
 
-        고정 조향 원호가 아니라 **차선을 계속 따라가며 옆으로 비껴가는** 것이
-        요점이다 — 곡선 구간에서도 도로를 벗어나지 않는다. detect.py 가 한쪽
-        차선만 잡혔을 때 쓰는 "상수항만 밀기"와 같은 기법이다.
+        회전 기동과 같은 방식이다 — 목표점을 만들어 넣어 얻은 고정 서보값
+        (_servo_table)을 그대로 낸다. 예전에는 인식된 중심선을 옆으로 밀어
+        Pure Pursuit 을 다시 태웠는데, 회피 구간은 애초에 차선이 잘 안 잡히는
+        구간이라 밀 대상이 없으면 조향이 직전 값에 멈춰 있었고, 한쪽만 잡혀
+        외삽된 중심선이 나오면 그 가짜 중심선을 따라갔다. 지금은 인식 결과가
+        어떻든 기동이 계획대로 나간다.
+
+        기동은 두 단계이고 **둘 다 고정 서보**다.
+
+            AVOID_FRAMES          피하는 쪽 서보로 꺾는다
+            AVOID_RECOVER_FRAMES  반대쪽 서보로 꺾어 차체를 도로와 나란히 놓는다
 
         속도는 AVOID_SPEED 를 쓴다 — 감속(SLOW_SPEED)은 걸지 않는다.
         교차로 직진·회전과 같은 규약이다.
 
-        **복귀는 시간으로만 판정한다.** AVOID_FRAMES 가 지나면 차선을 잡았든
-        아니든 차선 추종으로 돌아간다. 예전에는 피하는 쪽 차선이 연속으로
-        잡히기를 기다렸는데, 회피 구간에서 차선 인식이 잘 안 돼 그 조건이
-        성립하지 않았다.
-
-        기동은 두 단계다. AVOID_FRAMES 동안 피하는 쪽으로 밀고, 이어서
-        AVOID_RECOVER_FRAMES 동안 **반대쪽으로 같은 양을 밀어** 옆으로 기운
-        차체를 도로와 나란히 되돌린다. 뒤 단계가 짧으므로 각도만 돌아오고
-        옆으로 나간 거리는 남는다.
+        **복귀는 시간으로만 판정한다.** 차선 재획득은 보지 않는다 — 회피 구간
+        에서 차선 인식이 잘 안 돼 그 조건이 성립하지 않았다.
         """
         self.stats['avoid'] += 1
         held = self.stats['frames'] - self.avoid_start_n
-        sign = +1.0 if self.avoid_side == 'right' else -1.0
         recovering = held >= cfg.AVOID_FRAMES
+        # 복귀는 **표에서 반대쪽 값을 꺼내** 쓴다. 서보값을 반사(180-x)하면
+        # 좌우 가동각이 달라 각도가 어긋난다 (servo() docstring 참조).
+        side = self.avoid_side
         if recovering:
-            sign = -sign
+            side = 'left' if side == 'right' else 'right'
 
-        if res.fit_center is not None:
-            # BEV x 는 오른쪽으로 증가한다. 상수항만 더하면 평행이동이다.
-            shifted = detect.LaneResult(status=res.status,
-                                        fit_center=res.fit_center.copy())
-            shifted.fit_center[-1] += sign * cfg.AVOID_OFFSET_PX
-            out = self.pp(shifted, self.roi_h, self.y_start)
-            if out.ok:
-                target = out.servo
-                if self.invert_servo:
-                    target = self.pp.servo(-out.delta_deg)
-                self.apply_servo(self.servo_cmd
-                                 + self.alpha * (target - self.servo_cmd))
-        # 중심선이 없으면 밀 대상이 없다 — 직전 조향을 유지하고 버틴다.
-
-        # 감속 배율은 걸지 않는다 — 교차로 직진·회전과 같은 규약으로, 회피는
-        # 자기 속도를 그대로 쓴다. red / right_sign 이 보인다고 회피 중에
-        # 속도가 또 절반이 되면 기동이 두 배로 길어진다.
+        # 회전과 같이 평활 없이 한 프레임에 넣는다 (EMA 는 차선 추종 분기의
+        # 것이다) — 원호를 늦게 시작하면 반경이 커져 계획한 만큼 못 비껴간다.
+        self.apply_servo(self.avoid_servo[side])
+        # 감속은 걸지 않는다 — 교차로 직진·회전과 같은 규약으로, 회피는 자기
+        # 속도를 그대로 쓴다. red / right_sign 이 보인다고 회피 중에 속도가
+        # 또 떨어지면 기동이 그만큼 길어진다.
         self.apply_motor(self.avoid_speed)
 
         if held >= cfg.AVOID_FRAMES + cfg.AVOID_RECOVER_FRAMES:
@@ -313,12 +310,12 @@ class CrossroadDriver(Driver):
             self._set_state('LANE_FOLLOW', f'회피 {held}프레임 완료')
         elif recovering:
             self._set_state(f'AVOID_BACK_{self.avoid_side.upper()}',
-                            f'중심선 {sign * cfg.AVOID_OFFSET_PX:+.0f}px, '
+                            f'servo {self.avoid_servo[side]} 고정, '
                             f'{held - cfg.AVOID_FRAMES}/'
                             f'{cfg.AVOID_RECOVER_FRAMES}프레임')
         else:
             self._set_state(f'AVOID_{self.avoid_side.upper()}',
-                            f'중심선 {sign * cfg.AVOID_OFFSET_PX:+.0f}px, '
+                            f'servo {self.avoid_servo[side]} 고정, '
                             f'{held}/{cfg.AVOID_FRAMES}프레임')
 
     def _auto_turn_side(self, areas):
@@ -496,7 +493,7 @@ class CrossroadDriver(Driver):
                 self.avoid_start_n = self.stats['frames']
                 print(f'  [회피] {side} 시작 — 중심선 {cfg.AVOID_OFFSET_PX}px 이동')
             if self.avoid_side is not None:
-                self._step_avoid(ctrl, res)
+                self._step_avoid()
                 return ctrl, roi, res, y_start
 
         if ctrl.ok:
