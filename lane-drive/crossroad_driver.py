@@ -111,12 +111,17 @@ class CrossroadDriver(Driver):
         """상태표/HUD 에 나가는 한 줄. 상태와 근거를 함께 보여준다."""
         return f'{self.sub_state} — {self.reason}' if self.reason else self.sub_state
 
-    def format_history(self):
-        """최근 판단 이력. 웹 화면과 종료 요약이 같은 것을 쓴다."""
+    def format_history(self, limit=None):
+        """최근 판단 이력. 웹 화면은 limit 로 잘라 쓰고, 종료 요약은 전부 쓴다.
+
+        웹에서 전부 띄우면 화면이 계속 길어져 스크롤하게 된다 — 주행 중에
+        스크롤할 손이 없으므로 최근 몇 줄만 보여주는 편이 낫다.
+        """
         if not self.history:
             return '(판단 전이 없음)'
+        rows = list(self.history)[-limit:] if limit else list(self.history)
         return '\n'.join(f'[{f:6d}] {name:18s} {why}'
-                         for f, name, why in self.history)
+                         for f, name, why in rows)
 
     def _turn_servo_table(self):
         """좌/우 회전에 쓸 서보값을 시작할 때 한 번만 계산한다.

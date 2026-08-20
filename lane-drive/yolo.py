@@ -182,12 +182,17 @@ def largest_area_by_class(boxes):
 
 
 def summary_with_area(boxes):
-    """'red 812 · right_sign 4310' — 상태표에서 면적 임계를 눈으로 재기 위한 것.
+    """'red 812 · human 9800 x2' — 상태표용 한 줄.
 
-    config.DETECTION_AREA_ENTER 를 다시 잴 때, 차를 원하는 거리에 놓고 이 숫자를
-    읽으면 그대로 임계값이 된다.
+    면적은 **클래스별 최대 박스**의 것이다. config.DETECTION_AREA_ENTER 를 다시
+    잴 때 차를 원하는 거리에 놓고 이 숫자를 읽으면 그대로 임계값이 된다.
+
+    같은 클래스가 둘 이상이면 뒤에 개수를 붙인다 — 면적만 보면 몇 개인지 알 수
+    없어서, 사람이 둘인데 하나로 보이는 상황을 놓친다.
     """
     areas = largest_area_by_class(boxes)
     if not areas:
         return '-'
-    return ' · '.join(f'{k} {int(v[0])}' for k, v in sorted(areas.items()))
+    counts = collections.Counter(b[4] for b in (boxes or []))
+    return ' · '.join(f'{k} {int(v[0])}' + (f' x{counts[k]}' if counts[k] > 1 else '')
+                      for k, v in sorted(areas.items()))

@@ -43,9 +43,10 @@ PAGE = """
  .hint{color:#888;font-size:13px;margin-top:8px;line-height:1.5}
  .log{margin-top:14px}
  .loghead{color:#888;font-size:12px;margin-bottom:4px}
+ /* 5줄 고정. 스크롤을 만들지 않는다 — 넘치는 것은 그냥 자른다 */
  #decisions{background:#0b0b0b;border:1px solid #262626;border-radius:6px;
             padding:8px;margin:0;font-size:12px;line-height:1.45;color:#c9d1d9;
-            max-height:230px;overflow:auto;white-space:pre}
+            height:calc(5 * 1.45em);overflow:hidden;white-space:pre}
 </style></head><body>
 <h1>Lane Tracer — live debug</h1>
 <div class="wrap">
@@ -63,7 +64,7 @@ PAGE = """
       <tr><td>LINK</td><td id="link">-</td></tr>
     </table>
     <div class="log">
-      <div class="loghead">판단 이력 (최근)</div>
+      <div class="loghead">판단 이력 (최근 5건)</div>
       <pre id="decisions">-</pre>
     </div>
     <div>
@@ -134,11 +135,7 @@ setInterval(async()=>{
   for(const k of ['mode','servo','motor','status','frames','objects','link'])
     document.getElementById(k).textContent=s[k];
   const dec=document.getElementById('decisions');
-  if(s.decisions!==undefined && dec.textContent!==s.decisions){
-    const atBottom = dec.scrollTop + dec.clientHeight >= dec.scrollHeight - 4;
-    dec.textContent = s.decisions;
-    if(atBottom) dec.scrollTop = dec.scrollHeight;   // 최신 줄을 따라간다
-  }
+  if(s.decisions!==undefined) dec.textContent = s.decisions;
   document.getElementById('fps').textContent=s.fps.toFixed(1);
   document.getElementById('fps_avg').textContent=s.fps_avg.toFixed(1);
   for(const m of ['AUTO','MANUAL','STOP'])
@@ -185,7 +182,8 @@ def make_app(shared, driver, save_dir):
         # 판단 이력은 **여기서** 만든다. 제어 루프가 매 프레임 문자열을 엮을
         # 이유가 없고, 이 핸들러는 Flask 스레드에서 폴링 주기로만 돈다.
         if hasattr(driver, 'format_history'):
-            tel['decisions'] = driver.format_history()
+            # 최근 5줄만. 전부 띄우면 화면이 계속 길어져 주행 중에 스크롤하게 된다.
+            tel['decisions'] = driver.format_history(limit=5)
         return jsonify(tel)
 
     @app.route('/api/control', methods=['POST'])
