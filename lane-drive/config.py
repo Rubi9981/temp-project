@@ -369,7 +369,7 @@ TURN_COOLDOWN_FRAMES = 90
 # 여기를 고치면 mission.py 의 상태 진입과 crossroad_driver 의 정지/회전이
 # **함께** 따라온다 — 같은 물리량을 두 곳에서 따로 튜닝하지 않기 위해서다.
 DETECTION_AREA_ENTER = {
-    'right_sign': 4200,
+    'right_sign': 3500,
     'red': 600,
     'left': 500,
     'right': 500,
