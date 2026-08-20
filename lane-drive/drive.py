@@ -34,6 +34,7 @@ afb1.flask 는 쓰지 않는다 — 동작을 확인할 수 없어 화면이 안
     --no-slow-on-sight  red/right_sign 감속 끄기
     --no-red-stop       빨간불 정지 끄기
     --no-auto-turn      자동 회전 끄기 (웹 TURN 버튼은 유지)
+    --no-avoid          정적 장애물 회피 끄기
 
 주행 모드 (웹에서 전환):
     AUTO   — Pure Pursuit 자율주행
@@ -92,6 +93,13 @@ def main():
                          f'(x{cfg.SLOW_FACTOR:g})을 끈다')
     ap.add_argument('--no-red-stop', dest='red_stop', action='store_false',
                     help=f'red 면적 {cfg.DETECTION_AREA_ENTER["red"]} 초과 시 정지를 끈다')
+    ap.add_argument('--avoid-speed', type=int, default=cfg.AVOID_SPEED,
+                    help=f'정적 장애물 회피 중 속도 (기본 {cfg.AVOID_SPEED})')
+    ap.add_argument('--no-avoid', dest='avoid', action='store_false',
+                    help=f'정적 장애물 회피를 끈다 — car_white 면적 '
+                         f'{cfg.DETECTION_AREA_ENTER["car_white"]} 이상이면 오른쪽, '
+                         f'car_red 면적 {cfg.DETECTION_AREA_ENTER["car_red"]} 이상이면 '
+                         '왼쪽으로 중심선을 민다')
     ap.add_argument('--no-auto-turn', dest='auto_turn', action='store_false',
                     help=f'방향 신호(면적 {cfg.DETECTION_AREA_ENTER["left"]}) / '
                          f'표지판(면적 {cfg.DETECTION_AREA_ENTER["right_sign"]}) '
@@ -160,6 +168,7 @@ def main():
     args.web = not args.no_web
     speed = 0 if args.dry_run else args.speed
     cross_speed = 0 if args.dry_run else args.cross_speed
+    avoid_speed = 0 if args.dry_run else args.avoid_speed
 
     metric = cfg.get_metric()
     if not metric.measured:
@@ -230,14 +239,16 @@ def main():
         import crossroad_driver
         driver = crossroad_driver.CrossroadDriver(
             *driver_args, det=det, crossroad_speed=cross_speed,
+            avoid_speed=avoid_speed,
             slow_on_sight=args.slow_on_sight, red_stop=args.red_stop,
-            auto_turn=args.auto_turn, **driver_kw)
-        print(f'[교차로] 직진 속도 {cross_speed}  '
+            auto_turn=args.auto_turn, avoid=args.avoid, **driver_kw)
+        print(f'[교차로] 직진 속도 {cross_speed}  회피 속도 {avoid_speed}  '
               f'최대 {cfg.CROSSROAD_MAX_FRAMES}프레임  '
               f'정지 대상 {", ".join(cfg.CROSSROAD_STOP_CLASSES)}')
         auto = [n for n, on in (('감속', args.slow_on_sight),
                                 ('빨간불 정지', args.red_stop),
-                                ('자동 회전', args.auto_turn)) if on]
+                                ('자동 회전', args.auto_turn),
+                                ('장애물 회피', args.avoid)) if on]
         print(f'[자동] {" / ".join(auto) if auto else "전부 꺼짐"}  '
               f'면적 임계 red={cfg.DETECTION_AREA_ENTER["red"]} '
               f'right_sign={cfg.DETECTION_AREA_ENTER["right_sign"]} '

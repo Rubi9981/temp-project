@@ -16,20 +16,22 @@ AUTO 모드에서의 판단 순서:
     3. 정지 대상 객체     human (CROSSROAD_STOP_CLASSES)    -> 정지
     4. 자동 회전 트리거   화살표·표지판 면적 >= 임계        -> 회전 시작
     5. 빨간불 면적 초과   DETECTION_AREA_ENTER['red']         -> 정지 후 대기
-    6. ctrl.ok            차선 정상 (감속이 켜져 있으면 x0.5) -> Pure Pursuit
-    7. 차선 없음 + 객체 없음                               -> 직진 (servo 90, 저속)
-    8. 그 외              차선 없음 + 객체 있음            -> 기존 실패 처리
+    6. 정적 장애물 회피   car_white -> 오른쪽 / car_red -> 왼쪽 (중심선 이동)
+    7. ctrl.ok            차선 정상 (감속이 켜져 있으면 x0.5) -> Pure Pursuit
+    8. 차선 없음 + 객체 없음                               -> 직진 (servo 90, 저속)
+    9. 그 외              차선 없음 + 객체 있음            -> 기존 실패 처리
 
 순서에 근거가 있다.
 
     2번이 3번보다 앞 — 정지 대상이 화면에 남아 기동이 중간에 멈추는 것을 막는다.
     3번이 4번보다 앞 — 사람이 앞을 막고 있으면 회전을 시작하지 않는다.
     4번이 5번보다 앞 — 빨간불에 서 있다가 화살표가 뜨면 그때 회전해야 한다.
+    6번이 7번 바로 앞 — 회피는 차선 추종의 변형이다 (중심선만 옆으로 민다).
 
 4·5·6번의 자동 반응은 **기본으로 켜져 있다.** drive.py 의 --no-slow-on-sight /
 --no-red-stop / --no-auto-turn 으로 각각 끈다.
 
-**7번(교차로 직진)의 진입 조건이 "차선이 안 보임"이라는 점을 알고 써야 한다.**
+**8번(교차로 직진)의 진입 조건이 "차선이 안 보임"이라는 점을 알고 써야 한다.**
 차선 실종은 교차로·급커브·반사광을 구분하지 못한다. images/obstacles(교차로가
 없는 데이터)로 replay 하면 88프레임이 이 상태로 분류되는데, 이는 그 데이터의
 차선 검출 실패 수와 정확히 같다 — 즉 **검출 실패 전부가 교차로로 오인된다.**
@@ -39,6 +41,7 @@ import collections
 import math
 
 import config as cfg
+import detect
 import yolo
 from driver import Driver
 
@@ -52,20 +55,23 @@ class CrossroadDriver(Driver):
     """
 
     def __init__(self, *args, det=None, crossroad_speed=None, turn_speed=None,
-                 target_classes=None, stop_classes=None,
-                 slow_on_sight=True, red_stop=True, auto_turn=True, **kwargs):
+                 avoid_speed=None, target_classes=None, stop_classes=None,
+                 slow_on_sight=True, red_stop=True, auto_turn=True, avoid=True,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.det = det
         # 자동 반응 세 가지. **기본으로 켜져 있다** (drive.py 의 --no-* 로 끈다).
         self.slow_on_sight = slow_on_sight
         self.red_stop = red_stop
         self.auto_turn = auto_turn
+        self.avoid = avoid
         # 면적 임계는 **DETECTION_AREA_ENTER 를 그대로 읽는다.** 사용자가 실측해
         # 넣은 값이고, 별도 상수를 두면 같은 물리량을 두 곳에서 튜닝하게 된다.
         self.area_enter = dict(cfg.DETECTION_AREA_ENTER)
         self.crossroad_speed = (cfg.CROSSROAD_SPEED if crossroad_speed is None
                                 else crossroad_speed)
         self.turn_speed = cfg.TURN_SPEED if turn_speed is None else turn_speed
+        self.avoid_speed = cfg.AVOID_SPEED if avoid_speed is None else avoid_speed
         self.target_classes = set(target_classes or cfg.CROSSROAD_TARGET_CLASSES)
         self.stop_classes = set(stop_classes or cfg.CROSSROAD_STOP_CLASSES)
 
@@ -83,6 +89,9 @@ class CrossroadDriver(Driver):
         # 회전이 끝난 프레임. 쿨다운 기준점이다. 시작할 때는 쿨다운이 걸려
         # 있으면 안 되므로 과거로 밀어 둔다.
         self.turn_done_n = -cfg.TURN_COOLDOWN_FRAMES
+        self.avoid_side = None          # 'left' | 'right' | None(회피 아님)
+        self.avoid_start_n = 0
+        self.avoid_exit_run = 0
         self.turn_servo = self._turn_servo_table()
         for side in ('left', 'right'):
             mn, to = self._turn_frames(side)
@@ -92,7 +101,7 @@ class CrossroadDriver(Driver):
                 print(f'[경고] {side} 회전: TURN_TIMEOUT({to}) <= TURN_MIN({mn}) 이라 '
                       '항상 타임아웃으로 끝납니다.')
         self.stats.update({'lane_follow': 0, 'crossroad': 0, 'object_stop': 0,
-                           'turn': 0})
+                           'turn': 0, 'avoid': 0})
 
     def _set_state(self, name, reason=''):
         """판단 결과를 기록한다. 이름이 바뀔 때만 이력에 남긴다.
@@ -167,6 +176,7 @@ class CrossroadDriver(Driver):
             self.crossroad_frames = 0
             self.turn_side = None       # 모드가 바뀌면 진행 중인 회전을 버린다
             self.turn_back_left = 0
+            self.avoid_side = None      # 모드가 바뀌면 진행 중인 회피도 버린다
             self._set_state('LANE_FOLLOW' if mode == 'AUTO' else mode,
                             f'모드 전환 -> {mode}')
         return ok
@@ -206,6 +216,79 @@ class CrossroadDriver(Driver):
     def _slow_factor(self, areas):
         """SLOW_CLASSES 중 하나라도 **보이면** SLOW_FACTOR. 면적은 보지 않는다."""
         return cfg.SLOW_FACTOR if any(c in areas for c in cfg.SLOW_CLASSES) else 1.0
+
+    def _avoid_side(self, areas):
+        """회피 방향. 없으면 None.
+
+        AVOID_SIDE 의 클래스 중 DETECTION_AREA_ENTER 임계를 넘은 것을 찾는다.
+        둘 다 넘으면 **면적이 큰 쪽**(더 가까운 쪽)을 피한다 — 흰 차를 피해
+        오른쪽으로 가는 도중 빨간 차가 가까워지면 그때 왼쪽으로 넘어간다.
+        """
+        hits = [(areas[c][0], side) for c, side in cfg.AVOID_SIDE.items()
+                if c in areas and areas[c][0] >= self.area_enter.get(c, float('inf'))]
+        return max(hits)[1] if hits else None
+
+    def _step_avoid(self, ctrl, res):
+        """회피 중 한 프레임. 중심선을 옆으로 밀어 Pure Pursuit 을 다시 태운다.
+
+        고정 조향 원호가 아니라 **차선을 계속 따라가며 옆으로 비껴가는** 것이
+        요점이다 — 곡선 구간에서도 도로를 벗어나지 않는다. detect.py 가 한쪽
+        차선만 잡혔을 때 쓰는 "상수항만 밀기"와 같은 기법이다.
+
+        속도는 AVOID_SPEED 를 쓴다 — 감속 배율(SLOW_FACTOR)은 걸지 않는다.
+        교차로 직진·회전과 같은 규약이다.
+
+        AVOID_MIN_FRAMES 동안은 탈출 조건을 보지 않는다. 회피를 시작하는 순간
+        그쪽 차선이 이미 보이고 있으면 첫 프레임에 끝나버리기 때문이다.
+        """
+        self.stats['avoid'] += 1
+        held = self.stats['frames'] - self.avoid_start_n
+        sign = +1.0 if self.avoid_side == 'right' else -1.0
+
+        if res.fit_center is not None:
+            # BEV x 는 오른쪽으로 증가한다. 상수항만 더하면 평행이동이다.
+            shifted = detect.LaneResult(status=res.status,
+                                        fit_center=res.fit_center.copy())
+            shifted.fit_center[-1] += sign * cfg.AVOID_OFFSET_PX
+            out = self.pp(shifted, self.roi_h, self.y_start)
+            if out.ok:
+                target = out.servo
+                if self.invert_servo:
+                    target = self.pp.servo(-out.delta_deg)
+                self.apply_servo(self.servo_cmd
+                                 + self.alpha * (target - self.servo_cmd))
+        # 중심선이 없으면 밀 대상이 없다 — 직전 조향을 유지하고 버틴다.
+
+        # 감속 배율은 걸지 않는다 — 교차로 직진·회전과 같은 규약으로, 회피는
+        # 자기 속도를 그대로 쓴다. red / right_sign 이 보인다고 회피 중에
+        # 속도가 또 절반이 되면 기동이 두 배로 길어진다.
+        self.apply_motor(self.avoid_speed)
+
+        name = f'AVOID_{self.avoid_side.upper()}'
+        if held < cfg.AVOID_MIN_FRAMES:
+            # 최소 구간에서는 탈출 카운터를 **세지도 않는다.** 세어두면 구간이
+            # 끝나는 순간 이미 조건이 차 있어 즉시 복귀해 버린다 (_step_turn 과
+            # 같은 규약). 그래서 최소 지속은 MIN + EXIT 프레임이 된다.
+            self._set_state(name, f'최소 구간 {held}/{cfg.AVOID_MIN_FRAMES}프레임')
+            return
+
+        # 피하는 쪽 차선이 **실제로 피팅**됐는가. 외삽된 것은 세지 않는다.
+        seen = (res.fit_right if self.avoid_side == 'right' else res.fit_left)
+        self.avoid_exit_run = self.avoid_exit_run + 1 if seen is not None else 0
+
+        if self.avoid_exit_run >= cfg.AVOID_EXIT_FRAMES:
+            print(f'  [회피] {self.avoid_side} 완료 — {held}프레임, 차선 재획득')
+            self.avoid_side = None
+            self._set_state('LANE_FOLLOW', f'회피 완료 — {held}프레임')
+        elif held > cfg.AVOID_TIMEOUT_FRAMES:
+            # 정지가 아니라 차선 추종으로 돌아간다 — 장애물은 이미 지나쳤을
+            # 가능성이 크고, 계속 밀고 있는 것이 더 위험하다.
+            print(f'  [회피] {self.avoid_side} {held}프레임 초과 — 정상 조향 복귀')
+            self.avoid_side = None
+            self._set_state('LANE_FOLLOW', f'회피 타임아웃 {held}프레임')
+        else:
+            self._set_state(name, f'중심선 {sign * cfg.AVOID_OFFSET_PX:+.0f}px, '
+                                  f'{held}프레임째')
 
     def _auto_turn_side(self, areas):
         """자동 회전 방향. 없으면 None.
@@ -369,6 +452,19 @@ class CrossroadDriver(Driver):
                 self.stopped = True
                 self.apply_motor(0)
                 self.apply_servo(cfg.SERVO_CENTER)
+                return ctrl, roi, res, y_start
+
+        # 정적 장애물 회피. 차선 추종의 변형이므로 바로 앞에 둔다 — 사람·
+        # 화살표·빨간불(3~5번)은 여전히 회피보다 우선한다.
+        if self.avoid:
+            side = self._avoid_side(areas)
+            if side is not None and side != self.avoid_side:
+                self.avoid_side = side
+                self.avoid_start_n = self.stats['frames']
+                self.avoid_exit_run = 0
+                print(f'  [회피] {side} 시작 — 중심선 {cfg.AVOID_OFFSET_PX}px 이동')
+            if self.avoid_side is not None:
+                self._step_avoid(ctrl, res)
                 return ctrl, roi, res, y_start
 
         if ctrl.ok:
