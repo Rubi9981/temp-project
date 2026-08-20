@@ -178,13 +178,17 @@ SERVO_EMA_ALPHA = 0.5
 # 객체 탐지 (yolo.py) — **기본은 원격 추론이다** (아래 절)
 #   --yolo 는 로컬 추론으로 되돌리는 스위치이고, --no-yolo 가 탐지를 끈다
 # ==============================================================================
-# NCNN 으로 내보낸 모델(폴더)을 쓴다. 현재 기본 모델은 best_v6.pt 를
-# imgsz=640 으로 변환한 best_v6_ncnn_model 이다.
-# 변환 명령: yolo export model=object_detection/best_v6.pt format=ncnn imgsz=640
+# NCNN 으로 내보낸 모델(폴더)을 쓴다. 현재 기본 모델은 best_v7.pt 를
+# imgsz=640 으로 변환한 best_v7_ncnn_model 이다.
+# 변환 명령: yolo export model=object_detection/best_v7.pt format=ncnn imgsz=640
 # NCNN 폴더는 맥의 yolo_server.py 에 두면 되고, Pi 원격 모드에서는 모델 파일이
 # 필요 없다. 다른 장비에서 직접 로컬 추론할 때는 폴더 전체를 복사한다(scp -r).
+#
+# **클래스 이름은 v6 와 같다** (car_red/car_white/human/left/red/right/right_sign).
+# yolo.py 는 id 가 아니라 이름으로 다루므로 아래 클래스 목록들은 그대로 쓴다.
+# 되돌리려면 best_v6_ncnn_model 이 그대로 있으니 이 줄만 바꾸면 된다.
 YOLO_MODEL_PATH = os.path.join(os.path.dirname(BASE_DIR),
-                               'object_detection', 'best_v6_ncnn_model')
+                               'object_detection', 'best_v7_ncnn_model')
 YOLO_CONF = 0.25
 
 # **NCNN 모델은 내보낼 때 크기가 고정된다.** 지금 모델은 640 으로 내보냈으므로
