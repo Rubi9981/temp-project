@@ -381,7 +381,7 @@ AVOID_OFFSET_PX = 150
 #
 # 그래서 이 값이 **곧 회피 폭**이다 — 속도(AVOID_SPEED)와 곱해진 만큼 옆으로
 # 이동한다. 속도를 바꾸면 이 값도 함께 봐야 한다.
-AVOID_FRAMES = 90
+AVOID_FRAMES = 60
 
 # 회전이 끝난 뒤 이 프레임 수 동안은 자동 트리거를 무시한다.
 # **없으면 회전이 반복된다** — 다 돌고 나서도 표지판·화살표가 시야에 남아 있으면
@@ -416,8 +416,8 @@ DETECTION_AREA_ENTER = {
     'left': 500,
     'right': 500,
     'human': 5000,
-    'car_red': 5500,
-    'car_white': 5500,
+    'car_red': 5000,
+    'car_white': 5000,
 }
 
 # 이 중 하나라도 **보이기만 하면** 차선 추종 속도를 SLOW_FACTOR 배로 줄인다.
