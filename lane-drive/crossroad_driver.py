@@ -91,7 +91,6 @@ class CrossroadDriver(Driver):
         self.turn_done_n = -cfg.TURN_COOLDOWN_FRAMES
         self.avoid_side = None          # 'left' | 'right' | None(회피 아님)
         self.avoid_start_n = 0
-        self.avoid_exit_run = 0
         self.turn_servo = self._turn_servo_table()
         for side in ('left', 'right'):
             mn, to = self._turn_frames(side)
@@ -238,8 +237,10 @@ class CrossroadDriver(Driver):
         속도는 AVOID_SPEED 를 쓴다 — 감속 배율(SLOW_FACTOR)은 걸지 않는다.
         교차로 직진·회전과 같은 규약이다.
 
-        AVOID_MIN_FRAMES 동안은 탈출 조건을 보지 않는다. 회피를 시작하는 순간
-        그쪽 차선이 이미 보이고 있으면 첫 프레임에 끝나버리기 때문이다.
+        **복귀는 시간으로만 판정한다.** AVOID_FRAMES 가 지나면 차선을 잡았든
+        아니든 차선 추종으로 돌아간다. 예전에는 피하는 쪽 차선이 연속으로
+        잡히기를 기다렸는데, 회피 구간에서 차선 인식이 잘 안 돼 그 조건이
+        성립하지 않았다.
         """
         self.stats['avoid'] += 1
         held = self.stats['frames'] - self.avoid_start_n
@@ -264,31 +265,14 @@ class CrossroadDriver(Driver):
         # 속도가 또 절반이 되면 기동이 두 배로 길어진다.
         self.apply_motor(self.avoid_speed)
 
-        name = f'AVOID_{self.avoid_side.upper()}'
-        if held < cfg.AVOID_MIN_FRAMES:
-            # 최소 구간에서는 탈출 카운터를 **세지도 않는다.** 세어두면 구간이
-            # 끝나는 순간 이미 조건이 차 있어 즉시 복귀해 버린다 (_step_turn 과
-            # 같은 규약). 그래서 최소 지속은 MIN + EXIT 프레임이 된다.
-            self._set_state(name, f'최소 구간 {held}/{cfg.AVOID_MIN_FRAMES}프레임')
-            return
-
-        # 피하는 쪽 차선이 **실제로 피팅**됐는가. 외삽된 것은 세지 않는다.
-        seen = (res.fit_right if self.avoid_side == 'right' else res.fit_left)
-        self.avoid_exit_run = self.avoid_exit_run + 1 if seen is not None else 0
-
-        if self.avoid_exit_run >= cfg.AVOID_EXIT_FRAMES:
-            print(f'  [회피] {self.avoid_side} 완료 — {held}프레임, 차선 재획득')
+        if held >= cfg.AVOID_FRAMES:
+            print(f'  [회피] {self.avoid_side} 완료 — {held}프레임')
             self.avoid_side = None
-            self._set_state('LANE_FOLLOW', f'회피 완료 — {held}프레임')
-        elif held > cfg.AVOID_TIMEOUT_FRAMES:
-            # 정지가 아니라 차선 추종으로 돌아간다 — 장애물은 이미 지나쳤을
-            # 가능성이 크고, 계속 밀고 있는 것이 더 위험하다.
-            print(f'  [회피] {self.avoid_side} {held}프레임 초과 — 정상 조향 복귀')
-            self.avoid_side = None
-            self._set_state('LANE_FOLLOW', f'회피 타임아웃 {held}프레임')
+            self._set_state('LANE_FOLLOW', f'회피 {held}프레임 완료')
         else:
-            self._set_state(name, f'중심선 {sign * cfg.AVOID_OFFSET_PX:+.0f}px, '
-                                  f'{held}프레임째')
+            self._set_state(f'AVOID_{self.avoid_side.upper()}',
+                            f'중심선 {sign * cfg.AVOID_OFFSET_PX:+.0f}px, '
+                            f'{held}/{cfg.AVOID_FRAMES}프레임')
 
     def _auto_turn_side(self, areas):
         """자동 회전 방향. 없으면 None.
@@ -461,7 +445,6 @@ class CrossroadDriver(Driver):
             if side is not None and side != self.avoid_side:
                 self.avoid_side = side
                 self.avoid_start_n = self.stats['frames']
-                self.avoid_exit_run = 0
                 print(f'  [회피] {side} 시작 — 중심선 {cfg.AVOID_OFFSET_PX}px 이동')
             if self.avoid_side is not None:
                 self._step_avoid(ctrl, res)
