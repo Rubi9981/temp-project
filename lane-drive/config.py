@@ -471,8 +471,8 @@ DETECTION_AREA_ENTER = {
     'left': 500,
     'right': 500,
     'human': 5000,
-    'car_red': 5000,
-    'car_white': 5000,
+    'car_red': 7000,
+    'car_white': 7000,
 }
 
 # 이 중 하나라도 **보이기만 하면** 차선 추종 속도를 SLOW_SPEED 로 줄인다.
