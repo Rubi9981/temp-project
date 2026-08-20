@@ -189,7 +189,7 @@ SERVO_EMA_ALPHA = 0.5
 # 되돌리려면 best_v6_ncnn_model 이 그대로 있으니 이 줄만 바꾸면 된다.
 YOLO_MODEL_PATH = os.path.join(os.path.dirname(BASE_DIR),
                                'object_detection', 'best_v7_ncnn_model')
-YOLO_CONF = 0.25
+YOLO_CONF = 0.20
 
 # **NCNN 모델은 내보낼 때 크기가 고정된다.** 지금 모델은 640 으로 내보냈으므로
 # 이 값도 640 이어야 한다. 448 로 쓰려면 imgsz=448 로 다시 내보내고 여기도 바꾼다.
