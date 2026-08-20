@@ -248,7 +248,7 @@ YOLO_WATCHDOG_MS = 2000
 #     CAR_SLOW_SPEED   앞의 모형 차량이 가까워졌을 때 (곱이 아니라 절대값)
 
 # 차선 추종 기본 속도. drive.py 는 --speed 를 명시해야 0 이 아니다.
-DRIVE_SPEED = 100        # afb1.gpio.motor() 값. raspi/L_6_CNN.py 가 주행에 쓰던 값
+DRIVE_SPEED = 150        # afb1.gpio.motor() 값. raspi/L_6_CNN.py 가 주행에 쓰던 값
 
 # 차선이 끊긴 교차로를 서보 중립으로 통과할 때 (--no-crossroad 로 끈다).
 CROSSROAD_SPEED = 50
@@ -430,7 +430,7 @@ AVOID_COOLDOWN_FRAMES = 90
 # 회전이 끝난 뒤 이 프레임 수 동안은 자동 트리거를 무시한다.
 # **없으면 회전이 반복된다** — 다 돌고 나서도 표지판·화살표가 시야에 남아 있으면
 # 곧바로 다시 돌기 때문이다. 웹 버튼 수동 트리거는 이 쿨다운을 무시한다.
-TURN_COOLDOWN_FRAMES = 90
+TURN_COOLDOWN_FRAMES = 300
 
 
 # ==============================================================================
