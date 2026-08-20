@@ -302,7 +302,7 @@ TURN_MIN_FRAMES = 100
 # 이만큼 돌았는데도 차선을 못 잡으면 정지 (30fps 기준 4초).
 # **좌회전은 여기에도 TURN_LEFT_FRAME_SCALE 이 곱해진다** — MIN 만 늘리면
 # 탈출 조건을 보기 시작하는 시점이 이미 타임아웃을 넘어 매번 정지로 끝난다.
-TURN_TIMEOUT_FRAMES = 120
+TURN_TIMEOUT_FRAMES = 150
 
 # 좌회전에만 곱하는 회전 시간 배율. 우회전은 1.0 (위 값 그대로).
 #
@@ -318,7 +318,7 @@ TURN_TIMEOUT_FRAMES = 120
 #
 # 좌/우를 독립적으로 튜닝하고 싶어지면 이 배율 대신 값을 side 별 dict 로
 # 나누면 된다 — crossroad_driver._turn_frames() 한 곳만 바뀐다.
-TURN_LEFT_FRAME_SCALE = 1.5
+TURN_LEFT_FRAME_SCALE = 1.0
 
 # 좌회전은 후진으로 시작한다 (우회전은 그대로 바로 꺾는다).
 #
@@ -332,7 +332,7 @@ TURN_LEFT_FRAME_SCALE = 1.5
 #
 # **후진 중에는 뒤를 보지 못한다.** 카메라가 앞만 향하고 후방 센서가 없으므로,
 # 이 값을 늘릴 때는 뒤에 무엇이 있는지 사람이 확인해야 한다.
-TURN_BACK_FRAMES = 30
+TURN_BACK_FRAMES = 0
 
 # 양쪽 차선이 이만큼 연속으로 잡히면 회전을 끝내고 차선 추종으로 돌아간다.
 TURN_EXIT_FRAMES = 5
