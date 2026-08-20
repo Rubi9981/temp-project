@@ -91,6 +91,11 @@ class CrossroadDriver(Driver):
         self.turn_done_n = -cfg.TURN_COOLDOWN_FRAMES
         self.avoid_side = None          # 'left' | 'right' | None(회피 아님)
         self.avoid_start_n = 0
+        # 방향별 회피 종료 프레임. 쿨다운 기준점이라 시작할 때는 걸려 있으면
+        # 안 되므로 과거로 밀어 둔다. **방향을 나눠 세는 것이 요점이다** —
+        # 오른쪽 회피 직후에도 왼쪽 회피는 즉시 걸려야 한다.
+        self.avoid_done_n = {'left': -cfg.AVOID_COOLDOWN_FRAMES,
+                             'right': -cfg.AVOID_COOLDOWN_FRAMES}
         self.turn_servo = self._turn_servo_table()
         for side in ('left', 'right'):
             mn, to = self._turn_frames(side)
@@ -229,6 +234,21 @@ class CrossroadDriver(Driver):
         area, name = max(hits)
         return name, area
 
+    def _avoid_ready(self, side):
+        """그 방향 회피를 지금 시작해도 되는지. 쿨다운은 **방향별**이다."""
+        return (self.stats['frames'] - self.avoid_done_n[side]
+                >= cfg.AVOID_COOLDOWN_FRAMES)
+
+    def _end_avoid(self):
+        """진행 중인 회피를 끝내고 **그 방향에** 쿨다운을 건다.
+
+        중간에 반대쪽으로 넘어갈 때도 부른다 — 그러지 않으면 넘어간 쪽 기동이
+        끝났을 때 처음 방향이 쿨다운 없이 곧바로 다시 걸린다.
+        """
+        if self.avoid_side is not None:
+            self.avoid_done_n[self.avoid_side] = self.stats['frames']
+            self.avoid_side = None
+
     def _avoid_side(self, areas):
         """회피 방향. 없으면 None.
 
@@ -287,8 +307,9 @@ class CrossroadDriver(Driver):
         self.apply_motor(self.avoid_speed)
 
         if held >= cfg.AVOID_FRAMES + cfg.AVOID_RECOVER_FRAMES:
-            print(f'  [회피] {self.avoid_side} 완료 — {held}프레임')
-            self.avoid_side = None
+            print(f'  [회피] {self.avoid_side} 완료 — {held}프레임, '
+                  f'쿨다운 {cfg.AVOID_COOLDOWN_FRAMES}프레임')
+            self._end_avoid()
             self._set_state('LANE_FOLLOW', f'회피 {held}프레임 완료')
         elif recovering:
             self._set_state(f'AVOID_BACK_{self.avoid_side.upper()}',
@@ -468,7 +489,9 @@ class CrossroadDriver(Driver):
         # 화살표·빨간불(3~5번)은 여전히 회피보다 우선한다.
         if self.avoid:
             side = self._avoid_side(areas)
-            if side is not None and side != self.avoid_side:
+            if (side is not None and side != self.avoid_side
+                    and self._avoid_ready(side)):
+                self._end_avoid()   # 반대쪽으로 넘어가는 경우 — 이쪽도 쿨다운
                 self.avoid_side = side
                 self.avoid_start_n = self.stats['frames']
                 print(f'  [회피] {side} 시작 — 중심선 {cfg.AVOID_OFFSET_PX}px 이동')

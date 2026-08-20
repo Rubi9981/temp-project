@@ -252,7 +252,8 @@ def main():
         print(f'[자동] {" / ".join(auto) if auto else "전부 꺼짐"}  '
               f'면적 임계 red={cfg.DETECTION_AREA_ENTER["red"]} '
               f'right_sign={cfg.DETECTION_AREA_ENTER["right_sign"]} '
-              f'쿨다운 {cfg.TURN_COOLDOWN_FRAMES}프레임')
+              f'쿨다운 회전 {cfg.TURN_COOLDOWN_FRAMES} / '
+              f'회피 {cfg.AVOID_COOLDOWN_FRAMES}프레임')
         if det is None:
             print('[경고] 탐지가 꺼져 있어 객체 판단 없이 "차선 없으면 직진"만 합니다.')
             print('       --yolo 또는 --yolo-remote 를 함께 주세요.')
