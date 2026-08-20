@@ -253,7 +253,7 @@ CROSSROAD_SPEED = 50
 
 # 회전 중 모터 속도. CROSSROAD_SPEED 와 분리한다 — 직진 통과와 회전은 요구
 # 속도가 다르고, 느릴수록 탈출 조건을 잡을 프레임이 늘어난다.
-TURN_SPEED = 40
+TURN_SPEED = 50
 
 # SLOW_CLASSES 가 보일 때 차선 추종 속도에 곱한다 (--no-slow-on-sight 로 끈다).
 # **차선 추종에만 걸린다** — 교차로 직진과 회전은 자기 속도를 그대로 쓴다.
